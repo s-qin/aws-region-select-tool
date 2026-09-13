@@ -691,7 +691,7 @@ function Invoke-EntryPoint {
         return 0
     }
     catch {
-        Write-Error ("AWS Region Select Tool failed: {0}" -f $_.Exception.Message)
+        Write-Error ("AWS Region Select Tool failed: {0}" -f $_.Exception.Message) -ErrorAction Continue
         return 2
     }
 }

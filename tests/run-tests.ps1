@@ -145,6 +145,18 @@ $source = Get-Content -LiteralPath $scriptPath -Raw
 Assert-True ($source -match "ValidateRange\(0, 60\)" -and $source -match "ValidateRange\(100, 5000\)") 'Probe count and delay have hard safety bounds'
 Assert-True ($source -notmatch 'ForEach-Object\s+-Parallel' -and $source -notmatch 'while\s*\(\s*\$true') 'No parallel or unbounded probe loop'
 
+$readmeEn = Get-Content -LiteralPath (Join-Path $root 'README.md') -Raw -Encoding UTF8
+$readmeZh = Get-Content -LiteralPath (Join-Path $root 'README.zh-CN.md') -Raw -Encoding UTF8
+$documentedParameters = @('Mode', 'IcmpSamplesPerRegion', 'TcpAttempts', 'TlsAttempts', 'PingTimeoutMs', 'ConnectionTimeoutMs', 'RoundDelayMs', 'MaxTargetsPerRegion', 'OutputPath', 'NoJson', 'UseCachedTargets', 'SkipTraceroute')
+foreach ($parameterName in $documentedParameters) {
+    Assert-True ($readmeEn -match [regex]::Escape("-$parameterName") -and $readmeZh -match [regex]::Escape("-$parameterName")) "README parameter parity: $parameterName"
+}
+Assert-True ($readmeEn -match 'README\.zh-CN\.md' -and $readmeZh -match '\[English\]\(README\.md\)') 'README language switch links'
+Assert-True ($readmeEn -match 'AWS US Region Network Test' -and $readmeZh -match 'AWS US Region Network Test' -and $source -match "AWS US Region Network Test") 'README example matches CLI heading'
+Assert-True ($readmeEn -match 'Region Score and Confidence' -and $readmeZh -match 'Region Score' -and $readmeZh -match 'Confidence' -and $readmeEn -match 'JSON report' -and $readmeZh -match '## JSON') 'README required scoring and JSON sections'
+$license = Get-Content -LiteralPath (Join-Path $root 'LICENSE') -Raw
+Assert-True ($license -match 'MIT License' -and $license -match 'Copyright \(c\) 2026 sqin') 'MIT License identity'
+
 Write-Host ''
 Write-Host ("RESULT passed={0} failed={1}" -f $script:Passed, $script:Failed)
 if ($script:Failed -gt 0) { exit 1 }
