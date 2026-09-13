@@ -1,6 +1,8 @@
 # Generated reports
 aws-us-region-test_*.json
+aws-real-ip-validation_*.json
 reports/
+.data/
 
 # Test and temporary output
 .tmp/
@@ -18,4 +20,3 @@ desktop.ini
 
 # PowerShell tooling caches
 .PSScriptAnalyzerSettings.psd1.user
-
