@@ -2,6 +2,8 @@
 
 [English](README.md)
 
+[![Windows](https://img.shields.io/badge/Windows-10_%7C_11-0078D4?style=flat&logo=windows11&logoColor=white)](https://www.microsoft.com/windows) [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B_%7C_7.x-5391FE?style=flat&logo=powershell&logoColor=white)](https://learn.microsoft.com/powershell/) [![AWS Lightsail](https://img.shields.io/badge/AWS-Lightsail-FF9900?style=flat&logo=amazonwebservices&logoColor=white)](https://aws.amazon.com/lightsail/) [![License](https://img.shields.io/github/license/s-qin/aws-region-select-tool?style=flat&logo=opensourceinitiative&logoColor=white)](LICENSE)
+
 这是一个包含两种互补流程的单文件 PowerShell 工具：**Region Baseline** 在部署前对三个 AWS 美国 Region 排名；**Real IP Validation** 用最近的本地 Baseline 验收新分配的 AWS/Lightsail IPv4 地址。
 
 - `us-east-1` — 美国东部（弗吉尼亚北部）

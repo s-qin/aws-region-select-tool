@@ -2,6 +2,8 @@
 
 [简体中文](README.zh-CN.md)
 
+[![Windows](https://img.shields.io/badge/Windows-10_%7C_11-0078D4?style=flat&logo=windows11&logoColor=white)](https://www.microsoft.com/windows) [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B_%7C_7.x-5391FE?style=flat&logo=powershell&logoColor=white)](https://learn.microsoft.com/powershell/) [![AWS Lightsail](https://img.shields.io/badge/AWS-Lightsail-FF9900?style=flat&logo=amazonwebservices&logoColor=white)](https://aws.amazon.com/lightsail/) [![License](https://img.shields.io/github/license/s-qin/aws-region-select-tool?style=flat&logo=opensourceinitiative&logoColor=white)](LICENSE)
+
 A single-file PowerShell tool with two complementary workflows: **Region Baseline** ranks three AWS US Regions before deployment, and **Real IP Validation** checks a newly assigned AWS/Lightsail IPv4 address against recent local baseline evidence.
 
 - `us-east-1` — US East (N. Virginia)
