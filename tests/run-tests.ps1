@@ -28,6 +28,24 @@ function Assert-Equal {
     Assert-True -Condition ($Actual -eq $Expected) -Name ("{0} (actual={1}, expected={2})" -f $Name, $Actual, $Expected)
 }
 
+function Invoke-CliProcess {
+    param([string]$Arguments)
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName = (Get-Process -Id $PID).Path
+    $info.Arguments = ('-NoProfile -File "{0}" {1}' -f $scriptPath,$Arguments)
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $info
+    [void]$process.Start()
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = ($stdout + $stderr) }
+}
+
 function New-Samples {
     param([double[]]$Values, [int]$Failures = 0)
     $items = New-Object System.Collections.Generic.List[object]
@@ -58,7 +76,7 @@ $parseErrors = $null
 Assert-Equal $parseErrors.Count 0 'PowerShell syntax parser'
 
 $help = Get-Help $scriptPath -Full | Out-String
-Assert-True ($help -match 'IcmpSamplesPerRegion' -and $help -match 'UseCachedTargets' -and $help -match 'SkipTraceroute' -and $help -match 'Real IP Validation mode') 'Comment-based help exposes parameters and mode semantics'
+Assert-True ($help -match 'TARGET ' -and $help -match 'LISTTARGETS' -and $help -match 'IcmpSamplesPerRegion' -and $help -match 'UseCachedTargets' -and $help -match 'SkipTraceroute' -and $help -match 'Real IP Validation') 'Comment-based help exposes V2 parameters and mode semantics'
 Assert-True ($help -match '-TargetIp 203\.0\.113\.10' -and $help -match 'Exit 3') 'Comment-based help exposes Real example and exit semantics'
 
 Assert-Equal (Get-Percentile @(10, 20, 30, 40) 50) 25 'P50 interpolation'
@@ -73,6 +91,28 @@ Assert-True ((Get-ModeDefaults 'Quick').Icmp -eq 9 -and (Get-ModeDefaults 'Quick
 Assert-True ((Get-ModeDefaults 'Standard').Icmp -eq 36 -and (Get-ModeDefaults 'Standard').Tcp -eq 8 -and (Get-ModeDefaults 'Standard').Tls -eq 4) 'Standard Baseline profile unchanged'
 Assert-True ((Get-ModeDefaults 'Thorough').Icmp -eq 45 -and (Get-ModeDefaults 'Thorough').Tcp -eq 10 -and (Get-ModeDefaults 'Thorough').Tls -eq 5) 'Thorough Baseline profile unchanged'
 
+Assert-Equal @((Get-RegionCatalog)).Count 19 'Catalog contains 19 Lightsail Regions'
+Assert-Equal @((Get-RegionCatalog | Select-Object -ExpandProperty Code -Unique)).Count 19 'Catalog Region codes are unique'
+Assert-True (@(Get-RegionCatalog | Where-Object { -not $_.LightsailSupported -or [string]::IsNullOrWhiteSpace($_.CatalogSource) -or [string]::IsNullOrWhiteSpace($_.CatalogUpdatedAt) }).Count -eq 0) 'Catalog metadata is complete'
+Assert-True ($script:RegionGroups.Count -eq 5 -and $script:RegionGroups['us-all'].Count -eq 3 -and $script:RegionGroups['americas-all'].Count -eq 5 -and $script:RegionGroups['eu-all'].Count -eq 6 -and $script:RegionGroups['apac-all'].Count -eq 8 -and $script:RegionGroups['global'].Count -eq 19) 'Built-in Region groups expand to frozen counts'
+$normalizedSelection = Resolve-RegionSelection ' AP-EAST-1, ap-southeast-1,AP-EAST-1 '
+Assert-True ($normalizedSelection.Kind -eq 'CustomSet' -and ($normalizedSelection.Regions -join ',') -eq 'ap-east-1,ap-southeast-1') 'Custom target trims normalizes and deduplicates in first-seen order'
+Assert-True ((Resolve-RegionSelection 'US-ALL').Regions -join ',' -eq 'us-east-1,us-east-2,us-west-2') 'Group selector is case-insensitive'
+$invalidTargetRejected = $false
+try { $null = Resolve-RegionSelection 'ap-east-1,us-west-1' } catch { $invalidTargetRejected = $_.Exception.Message -match 'Invalid Target token' }
+Assert-True $invalidTargetRejected 'Non-Lightsail/invalid Region is rejected before probing'
+$smallPlan = Get-ProbePlan @('us-east-1','us-east-2','us-west-2') 'Auto'
+$globalPlan = Get-ProbePlan $script:RegionOrder 'Auto'
+Assert-True ($smallPlan.Strategy -eq 'SingleStage' -and $smallPlan.FinalValidation.Profile -eq 'Standard') 'Auto planner uses Standard for 1-6 Regions'
+Assert-True ($globalPlan.Strategy -eq 'TwoStage' -and $globalPlan.Screening.Profile -eq 'Quick' -and $globalPlan.FinalValidation.Profile -eq 'Standard' -and $globalPlan.FinalistLimit -eq 5) 'Auto planner uses Quick then up to five Standard finalists for 7+ Regions'
+Assert-True ((Get-ProbePlan $script:RegionOrder 'Thorough').Strategy -eq 'SingleStage') 'Explicit Thorough applies to entire selected set'
+$menuInputs = New-Object 'System.Collections.Generic.Queue[string]'
+@('2','?','US-ALL') | ForEach-Object { $menuInputs.Enqueue($_) }
+$menuRequest = Read-InteractiveRequest -InputProvider { param($prompt) $menuInputs.Dequeue() }
+Assert-True ($menuRequest.Action -eq 'RegionProbe' -and $menuRequest.Target -eq 'US-ALL') 'Interactive targeted route supports catalog help and validated selection'
+$quitInputs = New-Object 'System.Collections.Generic.Queue[string]'; $quitInputs.Enqueue('q')
+Assert-Equal (Read-InteractiveRequest -InputProvider { param($prompt) $quitInputs.Dequeue() }).Action 'Quit' 'Interactive Q safely exits'
+
 $fixtureHtml = @'
 <table>
 <tr><td>us-east-1</td><td>10.0.0.0/8</td><td>1.1.1.1</td><td>1.1.1.2</td></tr>
@@ -81,7 +121,7 @@ $fixtureHtml = @'
 </table>
 '@
 $onlineTargets = Get-ReachabilityTargets -MaximumTargets 2 -ContentFetcher { $fixtureHtml }
-Assert-Equal $onlineTargets.Source 'AWSReachabilityPage' 'Reachability online parsing path'
+Assert-Equal $onlineTargets.Source 'AWSReachabilityPageWithPerRegionFallback' 'Reachability online parsing path'
 Assert-Equal $onlineTargets.Targets['us-east-1'][0] '1.1.1.1' 'Reachability parser excludes CIDR prefix'
 Assert-Equal $onlineTargets.Targets['us-east-1'].Count 2 'Reachability parser honors target limit'
 $fixtureJson = '[{"us-east-1":{"10.0.0.0/8":"1.1.1.1"}},{"us-east-2":{"10.0.0.0/8":"2.2.2.2"}},{"us-west-2":{"10.0.0.0/8":"3.3.3.3"}}]'
@@ -92,6 +132,8 @@ $dynamicTargets = Get-ReachabilityTargets -MaximumTargets 1 -ContentFetcher {
 }
 Assert-Equal $dynamicTargets.SourceUri 'http://ec2-reachability.amazonaws.com/prefixes-ipv4.json' 'Reachability page follows declared JSON data source'
 Assert-Equal $dynamicTargets.Targets['us-west-2'][0] '3.3.3.3' 'Reachability JSON data source parsing'
+$partialTargets = Get-ReachabilityTargets -Regions @('us-east-1','ap-east-1') -MaximumTargets 1 -ContentFetcher { $fixtureHtml }
+Assert-True ($partialTargets.Targets['us-east-1'].Count -eq 1 -and $partialTargets.Targets['ap-east-1'].Count -eq 0 -and $partialTargets.Failures['ap-east-1'] -match 'no verified cache') 'Per-Region target failure is isolated and not fabricated'
 $fallbackTargets = Get-ReachabilityTargets -MaximumTargets 2 -ContentFetcher { throw 'fixture outage' }
 Assert-Equal $fallbackTargets.Source 'BuiltInCache' 'Reachability fallback path'
 Assert-True ($fallbackTargets.FallbackReason -match 'fixture outage') 'Fallback reason is recorded'
@@ -137,12 +179,12 @@ Assert-Equal $noRecommendation.Region $null 'All-target failure emits no recomme
 Assert-True (($allFailed | Where-Object Health -eq 'NoData').Count -eq 3) 'All-target failure health state'
 
 $reportFixture = [pscustomobject][ordered]@{
-    SchemaVersion = '1.0'; Environment = [pscustomobject]@{ PowerShellVersion = $PSVersionTable.PSVersion.ToString() }
+    SchemaVersion = '2.0'; Environment = [pscustomobject]@{ PowerShellVersion = $PSVersionTable.PSVersion.ToString() }
     TargetDiscovery = $fallbackTargets; Rankings = $ranked; Recommendation = $recommendation
     RawSamples = [pscustomobject]@{ Icmp = @(); Tcp443 = @(); Tls = @() }
 }
 $parsedJson = $reportFixture | ConvertTo-Json -Depth 12 | ConvertFrom-Json
-Assert-Equal $parsedJson.SchemaVersion '1.0' 'JSON schema version is parseable'
+Assert-Equal $parsedJson.SchemaVersion '2.0' 'JSON schema version is parseable'
 Assert-True ($null -ne $parsedJson.TargetDiscovery -and $null -ne $parsedJson.RawSamples -and $parsedJson.Rankings.Count -eq 3) 'JSON required top-level content'
 
 Assert-True (Test-IPv4Literal '203.0.113.9') 'TargetIp accepts IPv4 literal'
@@ -167,8 +209,7 @@ $unknownFailed = $false
 try { Resolve-AwsIpRegion '192.0.2.1' $null { '{"prefixes":[]}' } | Out-Null } catch { $unknownFailed = $_.Exception.Message -match 'AWS_IP_NOT_RECOGNIZED' }
 Assert-True $unknownFailed 'Unknown IP has explicit no-guess error'
 
-$testDataRoot = Join-Path $root '.tmp\tests-history'
-if (Test-Path -LiteralPath $testDataRoot) { Remove-Item -LiteralPath $testDataRoot -Recurse -Force }
+$testDataRoot = Join-Path $root ('.tmp\tests-history-{0}' -f [guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $testDataRoot -Force)
 $historyPath = Join-Path $testDataRoot 'baseline-history.json'
 $now = [datetime]'2026-09-14T00:00:00Z'
@@ -239,9 +280,9 @@ $missingRef = [pscustomobject]@{Status='Missing';Metrics=$null}
 $noEvidence = Get-RealValidationAssessment $missingRef $blockedIcmp $noEvidenceTcp (Get-RealComparison $null $blockedIcmp)
 Assert-True (-not $noEvidence.EvidenceComplete) 'All evidence unavailable is insufficient'
 
-$realFixture = [pscustomobject][ordered]@{ SchemaVersion='1.1'; Operation='RealIpValidation'; Target=[pscustomobject]@{Ip='192.0.2.1';Region='us-west-2';ProbePort=22}; RegionDetection=$manual; BaselineReference=$baselineRef; RealMetrics=[pscustomobject]@{Icmp=$healthyIcmp;Tcp=$healthyTcp}; Comparison=$goodComparison; Verdict=$keep; RawSamples=[pscustomobject]@{Icmp=@();Tcp=@()} }
+$realFixture = [pscustomobject][ordered]@{ SchemaVersion='2.0'; Operation='RealIpValidation'; Target=[pscustomobject]@{Ip='192.0.2.1';Region='us-west-2';ProbePort=22}; RegionDetection=$manual; BaselineReference=$baselineRef; RealMetrics=[pscustomobject]@{Icmp=$healthyIcmp;Tcp=$healthyTcp}; Comparison=$goodComparison; Verdict=$keep; RealValidation=[pscustomobject]@{Verdict=$keep}; RawSamples=[pscustomobject]@{Icmp=@();Tcp=@()} }
 $realParsed = $realFixture | ConvertTo-Json -Depth 14 | ConvertFrom-Json
-Assert-True ($realParsed.SchemaVersion -eq '1.1' -and $realParsed.Operation -eq 'RealIpValidation' -and $null -ne $realParsed.Verdict) 'Real JSON schema is parseable'
+Assert-True ($realParsed.SchemaVersion -eq '2.0' -and $realParsed.Operation -eq 'RealIpValidation' -and $null -ne $realParsed.RealValidation.Verdict) 'Real JSON schema is parseable'
 
 $savedHistoryPath = $script:HistoryPath
 $script:HistoryPath = Join-Path $testDataRoot 'integration-history.json'
@@ -296,23 +337,65 @@ $poorRunner = {
 $retryIntegrated = Invoke-RealIpValidation -Address '192.0.2.12' -Port 22 -RegionOverride 'us-west-2' -SelectedMode 'Quick' -IcmpCount 3 -TcpCount 2 -IcmpTimeout 250 -ConnectTimeout 500 -DelayMs 100 -TargetLimit 1 -JsonPath $null -WriteJson $false -CachedTargetsOnly $true -OmitTraceroute $true -ConfirmationDelaySeconds 1 -BaselineRefresher $baselineRefresher -ProbeRunner $poorRunner
 Assert-True ($script:PoorRoundCount -eq 2 -and $null -ne $retryIntegrated.Confirmation) 'RETRY candidate runs exactly one delayed shortened confirmation'
 Assert-True ($retryIntegrated.Verdict.Recommendation -eq 'RETRY' -and $retryIntegrated.Verdict.InstanceFit -eq 'POOR') 'Two poor integrated rounds finalize RETRY/POOR'
+Assert-True ($retryIntegrated.SchemaVersion -eq '2.0' -and $null -ne $retryIntegrated.RealValidation -and $retryIntegrated.BaselineRefresh.Reason -eq 'QuickOnlyBaseline') 'Real workflow emits schema 2.0 and refreshes Quick-only baseline quality'
 $script:HistoryPath = $savedHistoryPath
+
+$v1History = [pscustomobject][ordered]@{ SchemaVersion='1.0'; UpdatedAtUtc=[datetime]::UtcNow.ToString('o'); BaselineRuns=@([pscustomobject][ordered]@{TimestampUtc=[datetime]::UtcNow.ToString('o');Mode='Standard';Scope='AllRegions';Regions=@()});RealValidations=@() }
+$migratedHistory = ConvertTo-HistorySchema2 $v1History
+Assert-True ($migratedHistory.Migrated -and $migratedHistory.Store.SchemaVersion -eq '2.0' -and $migratedHistory.Store.BaselineRuns[0].ProbeProfile -eq 'Standard' -and $migratedHistory.Store.BaselineRuns[0].Stage -eq 'FinalValidation') 'History 1.0 lazily migrates to schema 2.0 with quality metadata'
+
+$mockTargets = {
+    param($regions,$limit,$cachedOnly)
+    $targets = [ordered]@{}; $failures = [ordered]@{}; $octet = 10
+    foreach ($candidateRegion in $regions) {
+        if ($candidateRegion -eq 'ap-northeast-1') { $targets[$candidateRegion] = @(); $failures[$candidateRegion] = 'Mock unavailable target.' }
+        else { $targets[$candidateRegion] = @("192.0.2.$octet"); $octet++ }
+    }
+    [pscustomobject][ordered]@{ Source='DeterministicMock';SourceUri='mock://targets';RetrievedAtUtc=[datetime]::UtcNow.ToString('o');CacheUpdated=$null;FallbackReason=$null;Targets=$targets;Failures=$failures }
+}
+$mockProbe = {
+    param($kind,$probeRegion,$probeTarget,$timeout)
+    $index = [array]::IndexOf($script:RegionOrder,$probeRegion)
+    $duration = [double](20 + ($index * 7) + $(if ($kind -eq 'Tcp') { 3 } elseif ($kind -eq 'Tls') { 6 } else { 0 }))
+    [pscustomobject][ordered]@{ Region=$probeRegion;Target=$probeTarget;Host=$probeTarget;TimestampUtc=[datetime]::UtcNow.ToString('o');Success=$true;DurationMs=$duration;Status='MockSuccess';Error=$null }
+}
+$autoRegions = @($script:RegionOrder | Select-Object -First 7)
+$autoReport = Invoke-AwsRegionSelection -SelectedMode 'Auto' -IcmpCount 3 -TcpCount 1 -TlsCount 1 -IcmpTimeout 250 -ConnectTimeout 500 -DelayMs 100 -TargetLimit 1 -JsonPath $null -WriteJson $false -CachedTargetsOnly $false -OmitTraceroute $true -SelectedRegions $autoRegions -Scope 'CustomSet' -RecordHistory $false -Selection ($autoRegions -join ',') -TargetDiscoveryProvider $mockTargets -ProbeProvider $mockProbe
+Assert-True ($autoReport.SchemaVersion -eq '2.0' -and $autoReport.Operation -eq 'RegionProbe' -and $autoReport.ProbePlan.Strategy -eq 'TwoStage' -and $autoReport.ProbePlan.Screening.Icmp -eq 3 -and $autoReport.ProbePlan.FinalValidation.Tcp -eq 1) 'Integrated Global Auto report uses JSON schema 2.0 and records effective two-stage plan'
+Assert-True (@($autoReport.Screening.Rankings).Count -eq 7 -and @($autoReport.Screening.Rankings | Where-Object ProbeStatus -eq 'Unavailable').Count -eq 1) 'Unavailable Region remains in complete screening evidence'
+Assert-True (@($autoReport.FinalValidation.Rankings).Count -eq 5 -and @($autoReport.Recommendation.TopRegions).Count -le 3) 'Auto promotes at most five finalists and recommends at most three'
+Assert-True ($null -ne $autoReport.Screening.Rankings[0].PSObject.Properties['ScreeningRank'] -and $null -ne $autoReport.FinalValidation.Rankings[0].PSObject.Properties['FinalistRank']) 'Screening and finalist rank semantics remain separate'
+Assert-True ($null -ne $autoReport.RawSamples.Screening -and $null -ne $autoReport.RawSamples.FinalValidation -and $autoReport.Warnings.Count -eq 1) 'Schema 2.0 retains stage raw samples and explicit warnings'
+
+$cliInvalid = Invoke-CliProcess '-Target us-west-1 -NoJson'
+Assert-Equal $cliInvalid.ExitCode 2 'CLI rejects invalid Target before network operations'
+$cliConflict = Invoke-CliProcess '-Target us-all -TargetIp 192.0.2.1 -NoJson'
+Assert-Equal $cliConflict.ExitCode 2 'CLI rejects Target and TargetIp conflict before network operations'
+$cliRegion = Invoke-CliProcess '-Region us-west-2 -NoJson'
+Assert-Equal $cliRegion.ExitCode 2 'CLI rejects Region override outside Real mode'
+$cliList = Invoke-CliProcess '-ListTargets -NoJson'
+Assert-True ($cliList.ExitCode -eq 0 -and $cliList.Output -match 'ap-southeast-5' -and $cliList.Output -match 'global:') 'ListTargets is network-free and exposes full catalog/groups'
 
 Remove-Item -LiteralPath $testDataRoot -Recurse -Force
 
 $source = Get-Content -LiteralPath $scriptPath -Raw
 Assert-True ($source -match "ValidateRange\(0, 60\)" -and $source -match "ValidateRange\(100, 5000\)") 'Probe count and delay have hard safety bounds'
-Assert-True ($source -notmatch 'ForEach-Object\s+-Parallel' -and $source -notmatch 'while\s*\(\s*\$true') 'No parallel or unbounded probe loop'
+Assert-True ($source -notmatch 'ForEach-Object\s+-Parallel' -and $source -notmatch 'Start-ThreadJob|Start-Job') 'No parallel probe fan-out'
 
 $readmeEn = Get-Content -LiteralPath (Join-Path $root 'README.md') -Raw -Encoding UTF8
 $readmeZh = Get-Content -LiteralPath (Join-Path $root 'README.zh-CN.md') -Raw -Encoding UTF8
-$documentedParameters = @('TargetIp', 'ProbePort', 'Region', 'RetryDelaySeconds', 'Mode', 'IcmpSamplesPerRegion', 'TcpAttempts', 'TlsAttempts', 'PingTimeoutMs', 'ConnectionTimeoutMs', 'RoundDelayMs', 'MaxTargetsPerRegion', 'OutputPath', 'NoJson', 'UseCachedTargets', 'SkipTraceroute')
+$documentedParameters = @('Target', 'ListTargets', 'TargetIp', 'ProbePort', 'Region', 'RetryDelaySeconds', 'Mode', 'IcmpSamplesPerRegion', 'TcpAttempts', 'TlsAttempts', 'PingTimeoutMs', 'ConnectionTimeoutMs', 'RoundDelayMs', 'MaxTargetsPerRegion', 'OutputPath', 'NoJson', 'UseCachedTargets', 'SkipTraceroute')
 foreach ($parameterName in $documentedParameters) {
     Assert-True ($readmeEn -match [regex]::Escape("-$parameterName") -and $readmeZh -match [regex]::Escape("-$parameterName")) "README parameter parity: $parameterName"
 }
 Assert-True ($readmeEn -match 'README\.zh-CN\.md' -and $readmeZh -match '\[English\]\(README\.md\)') 'README language switch links'
-Assert-True ($readmeEn -match 'AWS US Region Network Test' -and $readmeZh -match 'AWS US Region Network Test' -and $source -match "AWS US Region Network Test") 'README example matches CLI heading'
-Assert-True ($readmeEn -match 'Region Score and Confidence' -and $readmeZh -match 'Region Score' -and $readmeZh -match 'Confidence' -and $readmeEn -match 'JSON report' -and $readmeZh -match '## JSON') 'README required scoring and JSON sections'
+Assert-True ($readmeEn -match 'AWS Lightsail Region Selection' -and $readmeZh -match 'AWS Lightsail Region Selection' -and $source -match "AWS Lightsail Region Selection") 'README example matches CLI heading'
+Assert-True ($readmeEn -match 'Region Score' -and $readmeEn -match 'Confidence' -and $readmeZh -match 'Region Score' -and $readmeZh -match 'Confidence' -and $readmeEn -match 'JSON report' -and $readmeZh -match 'JSON') 'README required scoring and JSON sections'
+Assert-True ($readmeEn -match 'Schema 2\.0' -and $readmeZh -match 'Schema 2\.0' -and $readmeEn -match 'us-all' -and $readmeZh -match 'us-all' -and $readmeEn -match 'Quick-only' -and $readmeZh -match 'Quick evidence') 'README V2 schema groups and baseline-quality parity'
+$changelog = Get-Content -LiteralPath (Join-Path $root 'CHANGELOG.md') -Raw -Encoding UTF8
+$workflow = Get-Content -LiteralPath (Join-Path $root '.github\workflows\test.yml') -Raw -Encoding UTF8
+Assert-True ($changelog -match '\[2\.0\.0\].*2026-09-28' -and $changelog -match 'Breaking' -and $changelog -match 'Schema 2\.0') 'CHANGELOG records V2 release and breaking schema'
+Assert-True ($workflow -match 'windows-latest' -and $workflow -match 'shell: powershell' -and $workflow -match 'shell: pwsh' -and $workflow -notmatch 'Target global|TargetIp') 'CI covers both runtimes without live probes'
 $license = Get-Content -LiteralPath (Join-Path $root 'LICENSE') -Raw
 Assert-True ($license -match 'MIT License' -and $license -match 'Copyright \(c\) 2026 sqin') 'MIT License identity'
 
