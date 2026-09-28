@@ -1,14 +1,24 @@
 <#
 .SYNOPSIS
-Measures AWS Region baselines or validates a real AWS/Lightsail IPv4 address.
+Ranks Amazon Lightsail Regions or validates a real AWS/Lightsail IPv4 address.
 
 .DESCRIPTION
-Runs low-rate, interleaved ICMP probes against AWS EC2 Reachability targets,
-then measures TCP 443 and TLS handshake performance against Regional AWS API
-endpoints. Traceroute is collected for diagnostics but is never scored. The
-script ranks us-east-1, us-east-2, and us-west-2 and writes a JSON report.
-With -TargetIp, it identifies the AWS Region (or uses -Region), compares the
-real IP with recent local baseline history, and validates ICMP/TCP stability.
+Without arguments, opens an interactive menu for a global Lightsail scan,
+targeted Region scan, or Real IP Validation. Region Probe mode accepts a
+single Region, built-in group, or comma-separated custom set. Auto mode uses
+Standard probes for 1-6 Regions and Quick screening followed by Standard
+validation of up to five finalists for 7 or more Regions. Probes are serial,
+bounded, and use dynamically discovered AWS EC2 Reachability targets.
+
+With -TargetIp, identifies the AWS Region (or uses -Region), compares the real
+IP with quality-aware local baseline history, and validates ICMP/TCP stability.
+Reports use JSON Schema 2.0. Traceroute is diagnostic and is never scored.
+
+.PARAMETER Target
+Region code, built-in group, or comma-separated custom Region set.
+
+.PARAMETER ListTargets
+Lists the controlled Lightsail Region catalog and built-in groups, then exits.
 
 .PARAMETER TargetIp
 IPv4 address to validate. Supplying it selects Real IP Validation mode.
@@ -17,13 +27,13 @@ IPv4 address to validate. Supplying it selects Real IP Validation mode.
 TCP port used for Real IP Validation. Default 22.
 
 .PARAMETER Region
-Manual Region override for an unknown/BYOIP address or offline range lookup.
+Manual Lightsail Region override for an unknown/BYOIP address or offline range lookup.
 
 .PARAMETER RetryDelaySeconds
 Delay before the one shortened confirmation run for a RETRY candidate.
 
 .PARAMETER Mode
-Quick, Standard (default), or Thorough sampling preset.
+Auto (default), Quick, Standard, or Thorough sampling strategy.
 
 .PARAMETER IcmpSamplesPerRegion
 Overrides the preset ICMP sample count per Region (3-60).
@@ -53,7 +63,8 @@ JSON report path. By default a timestamped file is created in the current direct
 Do not write a JSON report.
 
 .PARAMETER UseCachedTargets
-Skip online target discovery and use the targets bundled with this script.
+Skip online target discovery. Regions without a verified bundled target are
+reported unavailable; the script never fabricates fallback addresses.
 
 .PARAMETER SkipTraceroute
 Skip the one diagnostic tracert run per Region.
@@ -62,34 +73,46 @@ Skip the one diagnostic tracert run per Region.
 .\aws-region-select-tool.ps1
 
 .EXAMPLE
-.\aws-region-select-tool.ps1 -Mode Quick -UseCachedTargets -SkipTraceroute
+.\aws-region-select-tool.ps1 -Target global
+
+.EXAMPLE
+.\aws-region-select-tool.ps1 -Target us-all -Mode Standard
+
+.EXAMPLE
+.\aws-region-select-tool.ps1 -Target "ap-east-1,ap-southeast-1,ap-northeast-1"
+
+.EXAMPLE
+.\aws-region-select-tool.ps1 -ListTargets
 
 .EXAMPLE
 .\aws-region-select-tool.ps1 -TargetIp 203.0.113.10 -Region us-west-2 -ProbePort 22
 
 .OUTPUTS
-Console ranking and, unless -NoJson is used, a JSON report.
+Console recommendation/evidence and, unless -NoJson is used, a JSON 2.0 report.
 
 .NOTES
-Exit 0: recommendation produced. Exit 2: invalid/runtime error.
-Exit 3: insufficient evidence for a safe recommendation.
+Exit 0: actionable result, listing, or safe quit. Exit 2: usage/runtime error.
+Exit 3: insufficient evidence for a safe recommendation or verdict.
 #>
 #requires -Version 5.1
 [CmdletBinding()]
 param(
+    [string]$Target,
+
+    [switch]$ListTargets,
+
     [string]$TargetIp,
 
     [ValidateRange(1, 65535)]
     [int]$ProbePort = 22,
 
-    [ValidateSet('us-east-1', 'us-east-2', 'us-west-2')]
     [string]$Region,
 
     [ValidateRange(1, 60)]
     [int]$RetryDelaySeconds = 5,
 
-    [ValidateSet('Quick', 'Standard', 'Thorough')]
-    [string]$Mode = 'Standard',
+    [ValidateSet('Auto', 'Quick', 'Standard', 'Thorough')]
+    [string]$Mode = 'Auto',
 
     [ValidateRange(0, 60)]
     [int]$IcmpSamplesPerRegion = 0,
@@ -122,33 +145,108 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:ToolVersion = '1.1.0'
+$script:ToolVersion = '2.0.0'
 $script:ReachabilityUri = 'http://ec2-reachability.amazonaws.com/'
 $script:IpRangesUri = 'https://ip-ranges.amazonaws.com/ip-ranges.json'
 $script:HistoryPath = Join-Path $PSScriptRoot '.data\baseline-history.json'
 $script:CachedTargetUpdated = '2026-09-13'
-$script:RegionOrder = @('us-east-1', 'us-east-2', 'us-west-2')
-$script:RegionMetadata = [ordered]@{
-    'us-east-1' = [ordered]@{
-        Name = 'US East (N. Virginia)'
-        Endpoint = 'ec2.us-east-1.amazonaws.com'
-        CachedTargets = @('23.23.255.255', '34.192.0.54', '34.224.0.252')
+$script:CatalogSource = 'https://docs.aws.amazon.com/lightsail/latest/userguide/understanding-regions-and-availability-zones-in-amazon-lightsail.html'
+$script:CatalogUpdatedAt = '2026-09-27'
+$script:RegionCatalog = @(
+    @('us-east-1','N. Virginia','United States','Americas',$false), @('us-east-2','Ohio','United States','Americas',$false),
+    @('us-west-2','Oregon','United States','Americas',$false), @('ca-central-1','Canada (Central)','Canada','Americas',$false),
+    @('sa-east-1','Sao Paulo','Brazil','Americas',$false), @('ap-east-1','Hong Kong','Hong Kong','APAC',$true),
+    @('ap-northeast-1','Tokyo','Japan','APAC',$false), @('ap-northeast-2','Seoul','South Korea','APAC',$false),
+    @('ap-south-1','Mumbai','India','APAC',$false), @('ap-southeast-1','Singapore','Singapore','APAC',$false),
+    @('ap-southeast-2','Sydney','Australia','APAC',$false), @('ap-southeast-3','Jakarta','Indonesia','APAC',$true),
+    @('ap-southeast-5','Malaysia','Malaysia','APAC',$true), @('eu-central-1','Frankfurt','Germany','Europe',$false),
+    @('eu-north-1','Stockholm','Sweden','Europe',$false), @('eu-south-2','Spain','Spain','Europe',$true),
+    @('eu-west-1','Ireland','Ireland','Europe',$false), @('eu-west-2','London','United Kingdom','Europe',$false),
+    @('eu-west-3','Paris','France','Europe',$false)
+) | ForEach-Object {
+    [pscustomobject][ordered]@{ Code = $_[0]; Location = $_[1]; CountryOrArea = $_[2]; Geography = $_[3]; LightsailSupported = $true; OptInRequired = [bool]$_[4]; CatalogSource = $script:CatalogSource; CatalogUpdatedAt = $script:CatalogUpdatedAt }
+}
+$script:RegionOrder = @($script:RegionCatalog | ForEach-Object { $_.Code })
+$script:RegionMetadata = [ordered]@{}
+foreach ($catalogRegion in $script:RegionCatalog) {
+    $script:RegionMetadata[$catalogRegion.Code] = [ordered]@{
+        Name = $catalogRegion.Location
+        Endpoint = ('ec2.{0}.amazonaws.com' -f $catalogRegion.Code)
+        Catalog = $catalogRegion
+        CachedTargets = @()
     }
-    'us-east-2' = [ordered]@{
-        Name = 'US East (Ohio)'
-        Endpoint = 'ec2.us-east-2.amazonaws.com'
-        CachedTargets = @('3.13.0.254', '13.58.0.253', '52.15.55.0')
-    }
-    'us-west-2' = [ordered]@{
-        Name = 'US West (Oregon)'
-        Endpoint = 'ec2.us-west-2.amazonaws.com'
-        CachedTargets = @('18.246.28.254', '34.208.63.251', '35.95.2.254')
-    }
+}
+$script:RegionMetadata['us-east-1'].CachedTargets = @('23.23.255.255', '34.192.0.54', '34.224.0.252')
+$script:RegionMetadata['us-east-2'].CachedTargets = @('3.13.0.254', '13.58.0.253', '52.15.55.0')
+$script:RegionMetadata['us-west-2'].CachedTargets = @('18.246.28.254', '34.208.63.251', '35.95.2.254')
+$script:RegionGroups = [ordered]@{
+    'us-all' = @('us-east-1','us-east-2','us-west-2')
+    'americas-all' = @('us-east-1','us-east-2','us-west-2','ca-central-1','sa-east-1')
+    'eu-all' = @('eu-central-1','eu-north-1','eu-south-2','eu-west-1','eu-west-2','eu-west-3')
+    'apac-all' = @('ap-east-1','ap-northeast-1','ap-northeast-2','ap-south-1','ap-southeast-1','ap-southeast-2','ap-southeast-3','ap-southeast-5')
+    'global' = @($script:RegionOrder)
 }
 
 function New-OrderedObject {
     param([hashtable]$Properties)
     return [pscustomobject]$Properties
+}
+
+function Get-RegionCatalog {
+    return @($script:RegionCatalog | ForEach-Object { $_ })
+}
+
+function Resolve-RegionSelection {
+    param([Parameter(Mandatory = $true)][string]$Selection)
+    if ([string]::IsNullOrWhiteSpace($Selection)) { throw 'Target cannot be empty.' }
+    $normalized = $Selection.Trim().ToLowerInvariant()
+    if ($script:RegionGroups.Contains($normalized)) {
+        return [pscustomobject][ordered]@{ Input = $Selection; Normalized = $normalized; Kind = 'Group'; Group = $normalized; Regions = @($script:RegionGroups[$normalized]) }
+    }
+    $seen = [ordered]@{}
+    foreach ($part in @($normalized -split ',')) {
+        $token = $part.Trim()
+        if ([string]::IsNullOrWhiteSpace($token)) { throw "Invalid Target '$Selection': empty Region token." }
+        if ($token -notin $script:RegionOrder) { throw "Invalid Target token '$token'. Use -ListTargets to see supported Lightsail Regions and groups." }
+        if (-not $seen.Contains($token)) { $seen[$token] = $true }
+    }
+    $regions = @($seen.Keys)
+    $kind = if ($regions.Count -eq 1) { 'SingleRegion' } else { 'CustomSet' }
+    return [pscustomobject][ordered]@{ Input = $Selection; Normalized = ($regions -join ','); Kind = $kind; Group = $null; Regions = $regions }
+}
+
+function Get-SelectionScope {
+    param([object]$Selection)
+    if ($Selection.Kind -eq 'Group') { return ('Group:{0}' -f $Selection.Group) }
+    return $Selection.Kind
+}
+
+function Show-TargetCatalog {
+    Write-Host 'Amazon Lightsail Region Catalog'
+    Write-Host ("Source updated: {0}" -f $script:CatalogUpdatedAt)
+    Get-RegionCatalog | Select-Object Code, Location, CountryOrArea, Geography, OptInRequired | Format-Table -AutoSize | Out-Host
+    Write-Host 'Built-in groups'
+    foreach ($name in $script:RegionGroups.Keys) { Write-Host ("- {0}: {1}" -f $name, ($script:RegionGroups[$name] -join ', ')) }
+}
+
+function Get-ProbePlan {
+    param([Parameter(Mandatory = $true)][string[]]$SelectedRegions, [Parameter(Mandatory = $true)][string]$SelectedMode)
+    $count = @($SelectedRegions).Count
+    if ($count -lt 1) { throw 'At least one Region is required.' }
+    if ($SelectedMode -eq 'Auto' -and $count -ge 7) {
+        return [pscustomobject][ordered]@{
+            Strategy = 'TwoStage'; RequestedMode = 'Auto'; RegionCount = $count; FinalistLimit = 5; RecommendationLimit = 3
+            Screening = [pscustomobject][ordered]@{ Profile = 'Quick'; Regions = @($SelectedRegions); Icmp = 9; Tcp = 3; Tls = 2; Traceroute = $false }
+            FinalValidation = [pscustomobject][ordered]@{ Profile = 'Standard'; Regions = @(); Icmp = 36; Tcp = 8; Tls = 4; Traceroute = $true }
+        }
+    }
+    $profile = if ($SelectedMode -eq 'Auto') { 'Standard' } else { $SelectedMode }
+    $defaults = Get-ModeDefaults $profile
+    return [pscustomobject][ordered]@{
+        Strategy = 'SingleStage'; RequestedMode = $SelectedMode; RegionCount = $count; FinalistLimit = $count; RecommendationLimit = [math]::Min(3,$count)
+        Screening = $null
+        FinalValidation = [pscustomobject][ordered]@{ Profile = $profile; Regions = @($SelectedRegions); Icmp = $defaults.Icmp; Tcp = $defaults.Tcp; Tls = $defaults.Tls; Traceroute = $true }
+    }
 }
 
 function Get-ExceptionDetail {
@@ -296,7 +394,22 @@ function Resolve-AwsIpRegion {
 }
 
 function New-HistoryStore {
-    return [pscustomobject][ordered]@{ SchemaVersion = '1.0'; UpdatedAtUtc = [datetime]::UtcNow.ToString('o'); BaselineRuns = @(); RealValidations = @() }
+    return [pscustomobject][ordered]@{ SchemaVersion = '2.0'; UpdatedAtUtc = [datetime]::UtcNow.ToString('o'); BaselineRuns = @(); RealValidations = @() }
+}
+
+function ConvertTo-HistorySchema2 {
+    param([object]$Store)
+    if ($null -eq $Store.PSObject.Properties['SchemaVersion'] -or $null -eq $Store.PSObject.Properties['BaselineRuns'] -or $null -eq $Store.PSObject.Properties['RealValidations']) { throw 'History schema is incomplete.' }
+    $migrated = ([string]$Store.SchemaVersion -ne '2.0')
+    foreach ($run in @($Store.BaselineRuns)) {
+        if ($null -eq $run.PSObject.Properties['Selection']) { $run | Add-Member -NotePropertyName Selection -NotePropertyValue $(if ($null -ne $run.PSObject.Properties['Scope']) { [string]$run.Scope } else { 'Legacy' }) }
+        if ($null -eq $run.PSObject.Properties['ProbeProfile']) { $run | Add-Member -NotePropertyName ProbeProfile -NotePropertyValue $(if ($null -ne $run.PSObject.Properties['Mode']) { [string]$run.Mode } else { 'Legacy' }) }
+        if ($null -eq $run.PSObject.Properties['Stage']) { $run | Add-Member -NotePropertyName Stage -NotePropertyValue 'FinalValidation' }
+    }
+    $Store.SchemaVersion = '2.0'
+    $Store.BaselineRuns = @($Store.BaselineRuns)
+    $Store.RealValidations = @($Store.RealValidations)
+    return [pscustomobject][ordered]@{ Store = $Store; Migrated = $migrated }
 }
 
 function Trim-HistoryStore {
@@ -310,19 +423,17 @@ function Trim-HistoryStore {
 
 function Read-HistoryStore {
     param([string]$Path = $script:HistoryPath, [datetime]$NowUtc = [datetime]::UtcNow)
-    if (-not (Test-Path -LiteralPath $Path)) { return [pscustomobject][ordered]@{ Store = (New-HistoryStore); Recovery = $null } }
+    if (-not (Test-Path -LiteralPath $Path)) { return [pscustomobject][ordered]@{ Store = (New-HistoryStore); Recovery = $null; Migrated = $false } }
     try {
         $store = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($null -eq $store.PSObject.Properties['SchemaVersion'] -or $null -eq $store.PSObject.Properties['BaselineRuns'] -or $null -eq $store.PSObject.Properties['RealValidations']) { throw 'History schema is incomplete.' }
-        $store.BaselineRuns = @($store.BaselineRuns)
-        $store.RealValidations = @($store.RealValidations)
-        return [pscustomobject][ordered]@{ Store = (Trim-HistoryStore -Store $store -NowUtc $NowUtc); Recovery = $null }
+        $normalized = ConvertTo-HistorySchema2 -Store $store
+        return [pscustomobject][ordered]@{ Store = (Trim-HistoryStore -Store $normalized.Store -NowUtc $NowUtc); Recovery = $null; Migrated = $normalized.Migrated }
     }
     catch {
         $stamp = $NowUtc.ToUniversalTime().ToString('yyyyMMddHHmmssfff')
         $quarantine = "$Path.corrupt-$stamp.json"
         Move-Item -LiteralPath $Path -Destination $quarantine -Force
-        return [pscustomobject][ordered]@{ Store = (New-HistoryStore); Recovery = [pscustomobject][ordered]@{ Action = 'QuarantinedAndRebuilt'; CorruptPath = $quarantine; Error = $_.Exception.Message } }
+        return [pscustomobject][ordered]@{ Store = (New-HistoryStore); Recovery = [pscustomobject][ordered]@{ Action = 'QuarantinedAndRebuilt'; CorruptPath = $quarantine; Error = $_.Exception.Message }; Migrated = $false }
     }
 }
 
@@ -356,25 +467,29 @@ function Get-BaselineReference {
         if ($timestamp -gt $ValidationStartedUtc.ToUniversalTime()) { continue }
         foreach ($metrics in @($run.Regions)) { if ($metrics.Region -eq $Region) { $candidates.Add([pscustomobject]@{ Run = $run; Metrics = $metrics; Timestamp = $timestamp }) } }
     }
-    if ($candidates.Count -eq 0) { return [pscustomobject][ordered]@{ Status = 'Missing'; TimestampUtc = $null; AgeHours = $null; Metrics = $null; Mode = $null; Scope = $null } }
+    if ($candidates.Count -eq 0) { return [pscustomobject][ordered]@{ Status = 'Missing'; TimestampUtc = $null; AgeHours = $null; Metrics = $null; Mode = $null; Scope = $null; ProbeProfile = $null; Stage = $null } }
     $selected = @($candidates | Sort-Object Timestamp -Descending)[0]
     $ageHours = ($ValidationStartedUtc.ToUniversalTime() - $selected.Timestamp).TotalHours
     $status = if ($ageHours -le 6) { 'Fresh' } elseif ($ageHours -le 24) { 'Usable' } else { 'Stale' }
-    return [pscustomobject][ordered]@{ Status = $status; TimestampUtc = $selected.Timestamp.ToString('o'); AgeHours = [math]::Round($ageHours, 3); Metrics = $selected.Metrics; Mode = $selected.Run.Mode; Scope = $selected.Run.Scope }
+    $profile = if ($null -ne $selected.Run.PSObject.Properties['ProbeProfile']) { [string]$selected.Run.ProbeProfile } else { [string]$selected.Run.Mode }
+    return [pscustomobject][ordered]@{ Status = $status; TimestampUtc = $selected.Timestamp.ToString('o'); AgeHours = [math]::Round($ageHours, 3); Metrics = $selected.Metrics; Mode = $selected.Run.Mode; Scope = $selected.Run.Scope; ProbeProfile = $profile; Stage = $(if ($null -ne $selected.Run.PSObject.Properties['Stage']) { $selected.Run.Stage } else { 'FinalValidation' }) }
 }
 
 function Add-BaselineHistory {
-    param([object]$Store, [object]$Report, [string]$Scope = 'AllRegions')
+    param([object]$Store, [object]$Report, [string]$Scope = 'AllRegions', [string]$Selection = 'Legacy', [string]$ProbeProfile, [string]$Stage = 'FinalValidation')
     $regions = foreach ($item in @($Report.Rankings)) { [pscustomobject][ordered]@{ Region = $item.Region; P50Ms = $item.Icmp.P50Ms; P95Ms = $item.Icmp.P95Ms; LossPct = $item.Icmp.LossPct; JitterMs = $item.Icmp.JitterMs; Health = $item.Health; Score = $item.Score } }
-    $Store.BaselineRuns = @([pscustomobject][ordered]@{ TimestampUtc = $Report.Test.CompletedAtUtc; Mode = $Report.Test.Mode; Scope = $Scope; Regions = @($regions) }) + @($Store.BaselineRuns)
+    if ([string]::IsNullOrWhiteSpace($ProbeProfile)) { $ProbeProfile = [string]$Report.Test.Mode }
+    $Store.BaselineRuns = @([pscustomobject][ordered]@{ TimestampUtc = $Report.Test.CompletedAtUtc; Mode = $Report.Test.Mode; Scope = $Scope; Selection = $Selection; ProbeProfile = $ProbeProfile; Stage = $Stage; Regions = @($regions) }) + @($Store.BaselineRuns)
     return $Store
 }
 
 function Get-CachedTargetResult {
-    param([int]$MaximumTargets = 3, [string]$Reason)
+    param([int]$MaximumTargets = 3, [string]$Reason, [string[]]$Regions = $script:RegionOrder)
     $targets = [ordered]@{}
-    foreach ($region in $script:RegionOrder) {
+    $failures = [ordered]@{}
+    foreach ($region in $Regions) {
         $targets[$region] = @($script:RegionMetadata[$region].CachedTargets | Select-Object -First $MaximumTargets)
+        if (@($targets[$region]).Count -eq 0) { $failures[$region] = 'No verified built-in cached target is available for this Region.' }
     }
     return [pscustomobject][ordered]@{
         Source = 'BuiltInCache'
@@ -383,6 +498,7 @@ function Get-CachedTargetResult {
         CacheUpdated = $script:CachedTargetUpdated
         FallbackReason = $Reason
         Targets = $targets
+        Failures = $failures
     }
 }
 
@@ -390,9 +506,10 @@ function Get-ReachabilityTargets {
     param(
         [switch]$CachedOnly,
         [ValidateRange(1, 3)][int]$MaximumTargets = 3,
+        [string[]]$Regions = $script:RegionOrder,
         [scriptblock]$ContentFetcher
     )
-    if ($CachedOnly) { return Get-CachedTargetResult -MaximumTargets $MaximumTargets -Reason 'Requested by -UseCachedTargets.' }
+    if ($CachedOnly) { return Get-CachedTargetResult -MaximumTargets $MaximumTargets -Reason 'Requested by -UseCachedTargets.' -Regions $Regions }
 
     try {
         $effectiveSourceUri = $script:ReachabilityUri
@@ -418,10 +535,11 @@ function Get-ReachabilityTargets {
         }
 
         $targets = [ordered]@{}
+        $failures = [ordered]@{}
         $trimmedContent = ([string]$content).TrimStart()
         if ($trimmedContent.StartsWith('[') -or $trimmedContent.StartsWith('{')) {
             $jsonData = $content | ConvertFrom-Json
-            foreach ($region in $script:RegionOrder) {
+            foreach ($region in $Regions) {
                 $found = New-Object System.Collections.Generic.List[string]
                 foreach ($entry in @($jsonData)) {
                     $regionProperty = $entry.PSObject.Properties[$region]
@@ -431,12 +549,11 @@ function Get-ReachabilityTargets {
                         if ((Test-IPv4Literal $candidate) -and -not $found.Contains($candidate)) { $found.Add($candidate) }
                     }
                 }
-                if ($found.Count -eq 0) { throw "No valid target parsed for $region." }
                 $targets[$region] = @($found | Select-Object -First $MaximumTargets)
             }
         }
         else {
-            foreach ($region in $script:RegionOrder) {
+            foreach ($region in $Regions) {
                 $found = New-Object System.Collections.Generic.List[string]
                 $rowPattern = '(?is)<tr[^>]*>(?:(?!</tr>).)*' + [regex]::Escape($region) + '(?:(?!</tr>).)*</tr>'
                 foreach ($rowMatch in [regex]::Matches([string]$content, $rowPattern)) {
@@ -446,23 +563,36 @@ function Get-ReachabilityTargets {
                         if ((Test-IPv4Literal $candidate) -and -not $isPrefix -and -not $found.Contains($candidate)) { $found.Add($candidate) }
                     }
                 }
-                if ($found.Count -eq 0) { throw "No valid target parsed for $region." }
                 $targets[$region] = @($found | Select-Object -First $MaximumTargets)
             }
         }
 
+        foreach ($region in $Regions) {
+            if (@($targets[$region]).Count -gt 0) { continue }
+            $cached = @($script:RegionMetadata[$region].CachedTargets | Select-Object -First $MaximumTargets)
+            if ($cached.Count -gt 0) {
+                $targets[$region] = $cached
+                $failures[$region] = 'Online source had no valid target; using verified built-in cache for this Region.'
+            }
+            else {
+                $targets[$region] = @()
+                $failures[$region] = 'Online source had no valid target and no verified cache is available.'
+            }
+        }
+
         return [pscustomobject][ordered]@{
-            Source = 'AWSReachabilityPage'
+            Source = 'AWSReachabilityPageWithPerRegionFallback'
             SourceUri = $effectiveSourceUri
             RetrievedAtUtc = [datetime]::UtcNow.ToString('o')
             CacheUpdated = $script:CachedTargetUpdated
             FallbackReason = $null
             Targets = $targets
+            Failures = $failures
         }
     }
     catch {
         $detail = Get-ExceptionDetail $_.Exception
-        return Get-CachedTargetResult -MaximumTargets $MaximumTargets -Reason ("{0}: {1}" -f $detail.Type, $detail.Message)
+        return Get-CachedTargetResult -MaximumTargets $MaximumTargets -Reason ("{0}: {1}" -f $detail.Type, $detail.Message) -Regions $Regions
     }
 }
 
@@ -708,7 +838,7 @@ function Get-TcpOrTlsQuality {
 function Write-Ranking {
     param([object[]]$Ranked, [object]$Recommendation, [object]$TargetInfo)
     Write-Host ''
-    Write-Host 'AWS US Region Network Test'
+    Write-Host 'AWS Lightsail Region Selection'
     Write-Host 'Source: Current PC / Current Network Exit'
     Write-Host ("Target Source: {0}" -f $TargetInfo.Source)
     Write-Host ''
@@ -854,13 +984,15 @@ function Write-RealValidation {
     foreach ($reason in $Report.Verdict.Reasons) { Write-Host ("- {0}" -f $reason) }
 }
 
-function Invoke-AwsRegionSelection {
+function Invoke-RegionProbePass {
     [CmdletBinding()]
     param(
         [string]$SelectedMode, [int]$IcmpCount, [int]$TcpCount, [int]$TlsCount,
         [int]$IcmpTimeout, [int]$ConnectTimeout, [int]$DelayMs, [int]$TargetLimit,
         [string]$JsonPath, [bool]$WriteJson, [bool]$CachedTargetsOnly, [bool]$OmitTraceroute,
-        [string[]]$SelectedRegions = $script:RegionOrder, [string]$Scope = 'AllRegions', [bool]$RecordHistory = $true
+        [string[]]$SelectedRegions = $script:RegionOrder, [string]$Scope = 'AllRegions', [bool]$RecordHistory = $true,
+        [string]$Selection = 'Legacy', [string]$Stage = 'FinalValidation', [bool]$DisplayOutput = $true,
+        [scriptblock]$TargetDiscoveryProvider, [scriptblock]$ProbeProvider
     )
     $started = [datetime]::UtcNow
     if ($IcmpCount -in @(1, 2)) { throw 'IcmpSamplesPerRegion must be 0 (preset) or between 3 and 60.' }
@@ -870,17 +1002,19 @@ function Invoke-AwsRegionSelection {
     if ($TlsCount -eq 0) { $TlsCount = $defaults.Tls }
 
     Write-Host ("Loading AWS Reachability targets ({0} mode)..." -f $SelectedMode)
-    $targetInfo = Get-ReachabilityTargets -CachedOnly:$CachedTargetsOnly -MaximumTargets $TargetLimit
+    $targetInfo = if ($null -ne $TargetDiscoveryProvider) { & $TargetDiscoveryProvider $SelectedRegions $TargetLimit $CachedTargetsOnly } else { Get-ReachabilityTargets -CachedOnly:$CachedTargetsOnly -MaximumTargets $TargetLimit -Regions $SelectedRegions }
     if ($targetInfo.Source -eq 'BuiltInCache') { Write-Warning ("Using built-in cached targets: {0}" -f $targetInfo.FallbackReason) }
+    $availableRegions = @($SelectedRegions | Where-Object { @($targetInfo.Targets[$_]).Count -gt 0 })
 
     $icmpSamples = New-Object System.Collections.Generic.List[object]
     Write-Host ("Running {0} interleaved ICMP samples per Region..." -f $IcmpCount)
     for ($round = 0; $round -lt $IcmpCount; $round++) {
-        $regionsThisRound = @($SelectedRegions | Sort-Object { Get-Random })
+        $regionsThisRound = @($availableRegions | Sort-Object { Get-Random })
         foreach ($region in $regionsThisRound) {
             $regionTargets = @($targetInfo.Targets[$region])
             $target = $regionTargets[$round % $regionTargets.Count]
-            $icmpSamples.Add((Invoke-IcmpProbe -Region $region -Target $target -TimeoutMs $IcmpTimeout))
+            $sample = if ($null -ne $ProbeProvider) { & $ProbeProvider 'Icmp' $region $target $IcmpTimeout } else { Invoke-IcmpProbe -Region $region -Target $target -TimeoutMs $IcmpTimeout }
+            $icmpSamples.Add($sample)
         }
         if ($round -lt ($IcmpCount - 1)) { Start-Sleep -Milliseconds $DelayMs }
     }
@@ -888,27 +1022,32 @@ function Invoke-AwsRegionSelection {
     $tcpSamples = New-Object System.Collections.Generic.List[object]
     Write-Host ("Running {0} TCP 443 attempts per Region..." -f $TcpCount)
     for ($round = 0; $round -lt $TcpCount; $round++) {
-        foreach ($region in @($SelectedRegions | Sort-Object { Get-Random })) {
-            $tcpSamples.Add((Invoke-TcpProbe -Region $region -HostName $script:RegionMetadata[$region].Endpoint -TimeoutMs $ConnectTimeout))
+        foreach ($region in @($availableRegions | Sort-Object { Get-Random })) {
+            $sample = if ($null -ne $ProbeProvider) { & $ProbeProvider 'Tcp' $region $script:RegionMetadata[$region].Endpoint $ConnectTimeout } else { Invoke-TcpProbe -Region $region -HostName $script:RegionMetadata[$region].Endpoint -TimeoutMs $ConnectTimeout }
+            $tcpSamples.Add($sample)
         }
     }
 
     $tlsSamples = New-Object System.Collections.Generic.List[object]
     Write-Host ("Running {0} TLS handshake attempts per Region..." -f $TlsCount)
     for ($round = 0; $round -lt $TlsCount; $round++) {
-        foreach ($region in @($SelectedRegions | Sort-Object { Get-Random })) {
-            $tlsSamples.Add((Invoke-TlsProbe -Region $region -HostName $script:RegionMetadata[$region].Endpoint -TimeoutMs $ConnectTimeout))
+        foreach ($region in @($availableRegions | Sort-Object { Get-Random })) {
+            $sample = if ($null -ne $ProbeProvider) { & $ProbeProvider 'Tls' $region $script:RegionMetadata[$region].Endpoint $ConnectTimeout } else { Invoke-TlsProbe -Region $region -HostName $script:RegionMetadata[$region].Endpoint -TimeoutMs $ConnectTimeout }
+            $tlsSamples.Add($sample)
         }
     }
 
     $traces = [ordered]@{}
     foreach ($region in $SelectedRegions) {
-        if ($OmitTraceroute) {
+        if (@($targetInfo.Targets[$region]).Count -eq 0) {
+            $traces[$region] = [pscustomobject][ordered]@{ Region = $region; Target = $null; Skipped = $true; Success = $false; ExitCode = $null; Output = @(); Error = [string]$targetInfo.Failures[$region] }
+        }
+        elseif ($OmitTraceroute) {
             $traces[$region] = [pscustomobject][ordered]@{ Region = $region; Target = $targetInfo.Targets[$region][0]; Skipped = $true; Success = $false; ExitCode = $null; Output = @(); Error = $null }
         }
         else {
             Write-Host ("Capturing traceroute for {0}..." -f $region)
-            $trace = Invoke-TraceRoute -Region $region -Target $targetInfo.Targets[$region][0]
+            $trace = if ($null -ne $ProbeProvider) { & $ProbeProvider 'Traceroute' $region $targetInfo.Targets[$region][0] 0 } else { Invoke-TraceRoute -Region $region -Target $targetInfo.Targets[$region][0] }
             $trace | Add-Member -NotePropertyName Skipped -NotePropertyValue $false
             $traces[$region] = $trace
         }
@@ -922,24 +1061,25 @@ function Invoke-AwsRegionSelection {
         $tcp | Add-Member -NotePropertyName QualityPct -NotePropertyValue (Get-TcpOrTlsQuality $tcp)
         $tls | Add-Member -NotePropertyName QualityPct -NotePropertyValue (Get-TcpOrTlsQuality $tls)
         $health = Get-RegionHealth -Icmp $icmp -Tcp $tcp -Tls $tls
+        $probeStatus = if (@($targetInfo.Targets[$region]).Count -eq 0) { 'Unavailable' } elseif ($icmp.Received -eq 0 -and $tcp.Received -eq 0 -and $tls.Received -eq 0) { 'Failed' } elseif ($icmp.Received -lt $icmp.Sent -or $tcp.Received -lt $tcp.Sent -or $tls.Received -lt $tls.Sent) { 'Partial' } else { 'Complete' }
         $regionResults.Add([pscustomobject][ordered]@{
-            Region = $region; Name = $script:RegionMetadata[$region].Name; Endpoint = $script:RegionMetadata[$region].Endpoint
+            Region = $region; Name = $script:RegionMetadata[$region].Name; Location = $script:RegionMetadata[$region].Name; Endpoint = $script:RegionMetadata[$region].Endpoint
             Targets = @($targetInfo.Targets[$region]); Icmp = $icmp; Tcp = $tcp; Tls = $tls
             Health = $health; Score = 0.0; ScoreComponents = $null; DataCompletenessPct = 0.0
-            Traceroute = $traces[$region]
+            ProbeStatus = $probeStatus; UnavailableReason = $(if ($probeStatus -eq 'Unavailable') { [string]$targetInfo.Failures[$region] } else { $null }); Traceroute = $traces[$region]
         })
     }
     $ranked = Add-RegionScores -RegionResults @($regionResults | ForEach-Object { $_ })
     $recommendation = Get-Recommendation -RankedRegions $ranked
-    Write-Ranking -Ranked $ranked -Recommendation $recommendation -TargetInfo $targetInfo
+    if ($DisplayOutput) { Write-Ranking -Ranked $ranked -Recommendation $recommendation -TargetInfo $targetInfo }
 
     $report = [pscustomobject][ordered]@{
-        SchemaVersion = '1.1'
-        Operation = 'RegionBaseline'
+        SchemaVersion = '2.0'
+        Operation = 'RegionProbePass'
         Tool = [pscustomobject][ordered]@{ Name = 'AWS Region Select Tool'; Version = $script:ToolVersion }
         Test = [pscustomobject][ordered]@{
             StartedAtUtc = $started.ToString('o'); CompletedAtUtc = [datetime]::UtcNow.ToString('o')
-            Source = 'Current PC / Current Network Exit'; CandidateRegions = @($SelectedRegions); Mode = $SelectedMode; Scope = $Scope
+            Source = 'Current PC / Current Network Exit'; CandidateRegions = @($SelectedRegions); Mode = $SelectedMode; Scope = $Scope; Stage = $Stage
             Settings = [pscustomobject][ordered]@{ IcmpSamplesPerRegion = $IcmpCount; TcpAttemptsPerRegion = $TcpCount; TlsAttemptsPerRegion = $TlsCount; PingTimeoutMs = $IcmpTimeout; ConnectionTimeoutMs = $ConnectTimeout; RoundDelayMs = $DelayMs; TracerouteSkipped = $OmitTraceroute }
         }
         Environment = [pscustomobject][ordered]@{
@@ -947,6 +1087,7 @@ function Invoke-AwsRegionSelection {
             PowerShellVersion = $PSVersionTable.PSVersion.ToString(); PowerShellEdition = $(if ($PSVersionTable.ContainsKey('PSEdition')) { $PSVersionTable.PSEdition } else { 'Desktop' })
         }
         TargetDiscovery = $targetInfo
+        Selection = [pscustomobject][ordered]@{ Input = $Selection; Scope = $Scope; Regions = @($SelectedRegions) }
         Rankings = $ranked
         Recommendation = $recommendation
         RawSamples = [pscustomobject][ordered]@{
@@ -961,7 +1102,7 @@ function Invoke-AwsRegionSelection {
         try {
             $historyRead = Read-HistoryStore
             $historyInfo.Recovery = $historyRead.Recovery
-            $historyStore = Add-BaselineHistory -Store $historyRead.Store -Report $report -Scope $Scope
+            $historyStore = Add-BaselineHistory -Store $historyRead.Store -Report $report -Scope $Scope -Selection $Selection -ProbeProfile $SelectedMode -Stage $Stage
             $historyInfo.Write = Write-HistoryStore -Store $historyStore
             if ($null -ne $historyRead.Recovery) { Write-Warning ("History was corrupt and rebuilt; quarantined at {0}" -f $historyRead.Recovery.CorruptPath) }
         }
@@ -970,7 +1111,7 @@ function Invoke-AwsRegionSelection {
     $report | Add-Member -NotePropertyName History -NotePropertyValue $historyInfo
 
     if ($WriteJson) {
-        if ([string]::IsNullOrWhiteSpace($JsonPath)) { $JsonPath = Join-Path (Get-Location) ("aws-us-region-test_{0}.json" -f (Get-Date -Format 'yyyy-MM-dd_HHmmss')) }
+        if ([string]::IsNullOrWhiteSpace($JsonPath)) { $JsonPath = Join-Path (Get-Location) ("aws-region-probe_{0}.json" -f (Get-Date -Format 'yyyy-MM-dd_HHmmss')) }
         $parent = Split-Path -Parent $JsonPath
         if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent)) { [void](New-Item -ItemType Directory -Path $parent -Force) }
         $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $JsonPath -Encoding UTF8
@@ -978,6 +1119,130 @@ function Invoke-AwsRegionSelection {
         Write-Host ''
         Write-Host ("JSON report: {0}" -f $resolved)
         $report | Add-Member -NotePropertyName ReportPath -NotePropertyValue $resolved
+    }
+    return $report
+}
+
+function Add-StageRanks {
+    param([object[]]$Items, [string]$PropertyName)
+    $rank = 0
+    foreach ($item in @($Items)) {
+        $rank++
+        if ($null -ne $item.PSObject.Properties[$PropertyName]) { $item.$PropertyName = $rank }
+        else { $item | Add-Member -NotePropertyName $PropertyName -NotePropertyValue $rank }
+    }
+    return @($Items)
+}
+
+function Get-TopRecommendations {
+    param([object[]]$Ranked, [int]$Limit = 3)
+    $eligible = @($Ranked | Where-Object { $_.ProbeStatus -ne 'Unavailable' -and $_.Health -in @('Good','Fair','Degraded') -and $_.Icmp.Received -gt 0 -and $_.Tcp.Received -gt 0 -and $_.Tls.Received -gt 0 } | Select-Object -First $Limit)
+    $rank = 0
+    foreach ($item in $eligible) {
+        $rank++
+        if ($null -ne $item.PSObject.Properties['RecommendationRank']) { $item.RecommendationRank = $rank } else { $item | Add-Member -NotePropertyName RecommendationRank -NotePropertyValue $rank }
+    }
+    return @($eligible)
+}
+
+function Write-RegionProbeOutput {
+    param([object]$Report)
+    Write-Host ''
+    Write-Host 'AWS Lightsail Region Selection'
+    Write-Host ("Selection: {0} ({1} Regions)" -f $Report.Selection.Input,@($Report.Selection.Regions).Count)
+    Write-Host ("Plan: {0}" -f $Report.ProbePlan.Strategy)
+    if (@($Report.Recommendation.TopRegions).Count -gt 0) {
+        Write-Host ''
+        Write-Host 'Final Recommendation'
+        $Report.Recommendation.TopRegions | Select-Object RecommendationRank,Region,Location,Score,Health,DataCompletenessPct | Format-Table -AutoSize | Out-Host
+    }
+    else { Write-Warning 'No decisive winner / insufficient evidence.' }
+    if ($null -ne $Report.FinalValidation) {
+        if (@($Report.Selection.Regions).Count -eq 1) {
+            Write-Host 'Single Region Validation (Score is evidence quality, not a cross-Region rank)'
+            $Report.FinalValidation.Rankings | Select-Object Region,Location,@{Name='P50';Expression={$_.Icmp.P50Ms}},@{Name='P95';Expression={$_.Icmp.P95Ms}},@{Name='Loss%';Expression={$_.Icmp.LossPct}},Health,ProbeStatus,Score | Format-Table -AutoSize | Out-Host
+        }
+        else {
+            Write-Host 'Finalist Validation'
+            $Report.FinalValidation.Rankings | Select-Object FinalistRank,Region,Location,@{Name='P50';Expression={$_.Icmp.P50Ms}},@{Name='P95';Expression={$_.Icmp.P95Ms}},@{Name='Loss%';Expression={$_.Icmp.LossPct}},Health,ProbeStatus,Score | Format-Table -AutoSize | Out-Host
+        }
+    }
+    if ($null -ne $Report.Screening) {
+        Write-Host 'Global Screening - All Selected Regions'
+        $Report.Screening.Rankings | Select-Object ScreeningRank,Region,Location,@{Name='P50';Expression={$_.Icmp.P50Ms}},@{Name='P95';Expression={$_.Icmp.P95Ms}},@{Name='Loss%';Expression={$_.Icmp.LossPct}},@{Name='Jitter';Expression={$_.Icmp.JitterMs}},@{Name='TCP';Expression={$_.Tcp.SuccessRatePct}},@{Name='TLS';Expression={$_.Tls.SuccessRatePct}},Health,ProbeStatus | Format-Table -AutoSize | Out-Host
+    }
+}
+
+function Invoke-AwsRegionSelection {
+    [CmdletBinding()]
+    param(
+        [string]$SelectedMode, [int]$IcmpCount, [int]$TcpCount, [int]$TlsCount,
+        [int]$IcmpTimeout, [int]$ConnectTimeout, [int]$DelayMs, [int]$TargetLimit,
+        [string]$JsonPath, [bool]$WriteJson, [bool]$CachedTargetsOnly, [bool]$OmitTraceroute,
+        [string[]]$SelectedRegions = $script:RegionOrder, [string]$Scope = 'Group:global', [bool]$RecordHistory = $true,
+        [string]$Selection = 'global', [scriptblock]$TargetDiscoveryProvider, [scriptblock]$ProbeProvider
+    )
+    $started = [datetime]::UtcNow
+    $plan = Get-ProbePlan -SelectedRegions $SelectedRegions -SelectedMode $SelectedMode
+    if ($IcmpCount -gt 0) { if ($null -ne $plan.Screening) { $plan.Screening.Icmp = $IcmpCount }; $plan.FinalValidation.Icmp = $IcmpCount }
+    if ($TcpCount -gt 0) { if ($null -ne $plan.Screening) { $plan.Screening.Tcp = $TcpCount }; $plan.FinalValidation.Tcp = $TcpCount }
+    if ($TlsCount -gt 0) { if ($null -ne $plan.Screening) { $plan.Screening.Tls = $TlsCount }; $plan.FinalValidation.Tls = $TlsCount }
+    $plan.FinalValidation.Traceroute = (-not $OmitTraceroute)
+    Write-Host ("Probe plan: {0}; {1} selected Region(s)." -f $plan.Strategy,$plan.RegionCount)
+    if ($plan.Strategy -eq 'TwoStage') { Write-Host 'Auto: Quick screening for all selected Regions, then Standard validation for up to 5 finalists.' }
+
+    $screeningReport = $null
+    $finalReport = $null
+    if ($plan.Strategy -eq 'TwoStage') {
+        $screeningReport = Invoke-RegionProbePass -SelectedMode 'Quick' -IcmpCount $(if ($IcmpCount -gt 0) { $IcmpCount } else { 9 }) -TcpCount $(if ($TcpCount -gt 0) { $TcpCount } else { 3 }) -TlsCount $(if ($TlsCount -gt 0) { $TlsCount } else { 2 }) -IcmpTimeout $IcmpTimeout -ConnectTimeout $ConnectTimeout -DelayMs $DelayMs -TargetLimit $TargetLimit -JsonPath $null -WriteJson $false -CachedTargetsOnly $CachedTargetsOnly -OmitTraceroute $true -SelectedRegions $SelectedRegions -Scope $Scope -RecordHistory $RecordHistory -Selection $Selection -Stage 'Screening' -DisplayOutput $false -TargetDiscoveryProvider $TargetDiscoveryProvider -ProbeProvider $ProbeProvider
+        $screeningReport.Rankings = @(Add-StageRanks -Items $screeningReport.Rankings -PropertyName 'ScreeningRank')
+        $finalists = @($screeningReport.Rankings | Where-Object { $_.ProbeStatus -ne 'Unavailable' -and $_.Health -in @('Good','Fair','Degraded') -and $_.Icmp.Received -gt 0 -and $_.Tcp.Received -gt 0 -and $_.Tls.Received -gt 0 } | Select-Object -First 5 | ForEach-Object { $_.Region })
+        $plan.FinalValidation.Regions = @($finalists)
+        if ($finalists.Count -gt 0) {
+            $finalReport = Invoke-RegionProbePass -SelectedMode 'Standard' -IcmpCount $(if ($IcmpCount -gt 0) { $IcmpCount } else { 36 }) -TcpCount $(if ($TcpCount -gt 0) { $TcpCount } else { 8 }) -TlsCount $(if ($TlsCount -gt 0) { $TlsCount } else { 4 }) -IcmpTimeout $IcmpTimeout -ConnectTimeout $ConnectTimeout -DelayMs $DelayMs -TargetLimit $TargetLimit -JsonPath $null -WriteJson $false -CachedTargetsOnly $CachedTargetsOnly -OmitTraceroute $OmitTraceroute -SelectedRegions $finalists -Scope $Scope -RecordHistory $RecordHistory -Selection $Selection -Stage 'FinalValidation' -DisplayOutput $false -TargetDiscoveryProvider $TargetDiscoveryProvider -ProbeProvider $ProbeProvider
+            $finalReport.Rankings = @(Add-StageRanks -Items $finalReport.Rankings -PropertyName 'FinalistRank')
+        }
+    }
+    else {
+        $profile = $plan.FinalValidation.Profile
+        $finalReport = Invoke-RegionProbePass -SelectedMode $profile -IcmpCount $IcmpCount -TcpCount $TcpCount -TlsCount $TlsCount -IcmpTimeout $IcmpTimeout -ConnectTimeout $ConnectTimeout -DelayMs $DelayMs -TargetLimit $TargetLimit -JsonPath $null -WriteJson $false -CachedTargetsOnly $CachedTargetsOnly -OmitTraceroute $OmitTraceroute -SelectedRegions $SelectedRegions -Scope $Scope -RecordHistory $RecordHistory -Selection $Selection -Stage 'FinalValidation' -DisplayOutput $false -TargetDiscoveryProvider $TargetDiscoveryProvider -ProbeProvider $ProbeProvider
+        if (@($SelectedRegions).Count -gt 1) { $finalReport.Rankings = @(Add-StageRanks -Items $finalReport.Rankings -PropertyName 'FinalistRank') }
+    }
+
+    $finalRankings = if ($null -ne $finalReport) { @($finalReport.Rankings) } else { @() }
+    $primary = if ($null -ne $finalReport) { $finalReport.Recommendation } else { [pscustomobject][ordered]@{ Region=$null; Name=$null; Confidence='Low'; Decisive=$false; Message='Insufficient evidence; no finalists passed the screening gate.'; ScoreMargin=$null } }
+    $top = if ($primary.Decisive) { @(Get-TopRecommendations -Ranked $finalRankings -Limit 3) } else { @() }
+    $recommendation = [pscustomobject][ordered]@{ Region = $primary.Region; Name = $primary.Name; Confidence = $primary.Confidence; Decisive = $primary.Decisive; Message = $primary.Message; ScoreMargin = $primary.ScoreMargin; TopRegions = @($top) }
+    $warnings = New-Object System.Collections.Generic.List[string]
+    foreach ($pass in @($screeningReport,$finalReport)) {
+        if ($null -eq $pass) { continue }
+        foreach ($region in @($pass.Rankings | Where-Object ProbeStatus -eq 'Unavailable')) { $warnings.Add(("{0}: {1}" -f $region.Region,$region.UnavailableReason)) }
+    }
+    $report = [pscustomobject][ordered]@{
+        SchemaVersion = '2.0'; Operation = 'RegionProbe'
+        Tool = [pscustomobject][ordered]@{ Name = 'AWS Region Select Tool'; Version = $script:ToolVersion }
+        Environment = $(if ($null -ne $finalReport) { $finalReport.Environment } elseif ($null -ne $screeningReport) { $screeningReport.Environment } else { $null })
+        Test = [pscustomobject][ordered]@{ StartedAtUtc = $started.ToString('o'); CompletedAtUtc = [datetime]::UtcNow.ToString('o'); Mode = $SelectedMode; Scope = $Scope }
+        Catalog = [pscustomobject][ordered]@{ Source = $script:CatalogSource; UpdatedAt = $script:CatalogUpdatedAt; RegionCount = $script:RegionOrder.Count; Regions = @(Get-RegionCatalog) }
+        Selection = [pscustomobject][ordered]@{ Input = $Selection; Scope = $Scope; Regions = @($SelectedRegions) }
+        ProbePlan = $plan
+        TargetDiscovery = [pscustomobject][ordered]@{ Screening = $(if ($null -ne $screeningReport) { $screeningReport.TargetDiscovery } else { $null }); FinalValidation = $(if ($null -ne $finalReport) { $finalReport.TargetDiscovery } else { $null }) }
+        Screening = $(if ($null -ne $screeningReport) { [pscustomobject][ordered]@{ Profile = 'Quick'; Rankings = @($screeningReport.Rankings) } } else { $null })
+        FinalValidation = $(if ($null -ne $finalReport) { [pscustomobject][ordered]@{ Profile = $plan.FinalValidation.Profile; Rankings = @($finalReport.Rankings) } } else { $null })
+        Rankings = @($finalRankings)
+        Recommendation = $recommendation
+        RealValidation = $null
+        History = [pscustomobject][ordered]@{ Screening = $(if ($null -ne $screeningReport) { $screeningReport.History } else { $null }); FinalValidation = $(if ($null -ne $finalReport) { $finalReport.History } else { $null }) }
+        RawSamples = [pscustomobject][ordered]@{ Screening = $(if ($null -ne $screeningReport) { $screeningReport.RawSamples } else { $null }); FinalValidation = $(if ($null -ne $finalReport) { $finalReport.RawSamples } else { $null }) }
+        Warnings = @($warnings)
+    }
+    Write-RegionProbeOutput -Report $report
+    if ($WriteJson) {
+        if ([string]::IsNullOrWhiteSpace($JsonPath)) { $JsonPath = Join-Path (Get-Location) ("aws-region-probe_{0}.json" -f (Get-Date -Format 'yyyy-MM-dd_HHmmss')) }
+        $parent = Split-Path -Parent $JsonPath
+        if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent)) { [void](New-Item -ItemType Directory -Path $parent -Force) }
+        $report | ConvertTo-Json -Depth 18 | Set-Content -LiteralPath $JsonPath -Encoding UTF8
+        $resolved = (Resolve-Path -LiteralPath $JsonPath).Path; Write-Host ''; Write-Host ("JSON report: {0}" -f $resolved); $report | Add-Member -NotePropertyName ReportPath -NotePropertyValue $resolved
     }
     return $report
 }
@@ -1017,14 +1282,15 @@ function Invoke-RealIpValidation {
     $historyRecovery = $historyRead.Recovery
     if ($null -ne $historyRead.Recovery) { Write-Warning ("History was corrupt and rebuilt; quarantined at {0}" -f $historyRead.Recovery.CorruptPath) }
     $baseline = Get-BaselineReference -Store $historyRead.Store -Region $detection.Region -ValidationStartedUtc $started
-    $refresh = [pscustomobject][ordered]@{ Required = ($baseline.Status -in @('Stale','Missing')); Attempted = $false; Succeeded = $false; Region = $detection.Region; Error = $null }
+    $quickOnly = ($baseline.Status -in @('Fresh','Usable') -and $baseline.ProbeProfile -eq 'Quick')
+    $refresh = [pscustomobject][ordered]@{ Required = ($baseline.Status -in @('Stale','Missing') -or $quickOnly); Reason = $(if ($quickOnly) { 'QuickOnlyBaseline' } else { $baseline.Status }); Attempted = $false; Succeeded = $false; Region = $detection.Region; Error = $null }
     if ($refresh.Required) {
         $refresh.Attempted = $true
-        Write-Host ("Baseline {0}; refreshing only {1} in Quick mode..." -f $baseline.Status,$detection.Region)
+        Write-Host ("Baseline refresh required ({0}); refreshing only {1} in Standard mode..." -f $refresh.Reason,$detection.Region)
         try {
             if ($null -ne $BaselineRefresher) { & $BaselineRefresher $detection.Region }
             else {
-                $null = Invoke-AwsRegionSelection -SelectedMode 'Quick' -IcmpCount 0 -TcpCount 0 -TlsCount 0 -IcmpTimeout $IcmpTimeout -ConnectTimeout $ConnectTimeout -DelayMs $DelayMs -TargetLimit $TargetLimit -JsonPath $null -WriteJson $false -CachedTargetsOnly $CachedTargetsOnly -OmitTraceroute $true -SelectedRegions @($detection.Region) -Scope 'SingleRegionRefresh' -RecordHistory $true
+                $null = Invoke-AwsRegionSelection -SelectedMode 'Standard' -IcmpCount 0 -TcpCount 0 -TlsCount 0 -IcmpTimeout $IcmpTimeout -ConnectTimeout $ConnectTimeout -DelayMs $DelayMs -TargetLimit $TargetLimit -JsonPath $null -WriteJson $false -CachedTargetsOnly $CachedTargetsOnly -OmitTraceroute $true -SelectedRegions @($detection.Region) -Scope 'SingleRegionRefresh' -RecordHistory $true -Selection $detection.Region
             }
             $historyRead = Read-HistoryStore
             $baseline = Get-BaselineReference -Store $historyRead.Store -Region $detection.Region -ValidationStartedUtc ([datetime]::UtcNow.AddSeconds(1))
@@ -1052,15 +1318,20 @@ function Invoke-RealIpValidation {
     }
 
     $report = [pscustomobject][ordered]@{
-        SchemaVersion = '1.1'; Operation = 'RealIpValidation'
+        SchemaVersion = '2.0'; Operation = 'RealIpValidation'
         Tool = [pscustomobject][ordered]@{ Name = 'AWS Region Select Tool'; Version = $script:ToolVersion }
         Test = [pscustomobject][ordered]@{ StartedAtUtc = $started.ToString('o'); CompletedAtUtc = [datetime]::UtcNow.ToString('o'); Source = 'Current PC / Current Network Exit'; Mode = $SelectedMode; Settings = [pscustomobject][ordered]@{ IcmpSamples = $IcmpCount; TcpAttempts = $TcpCount; PingTimeoutMs = $IcmpTimeout; ConnectionTimeoutMs = $ConnectTimeout; RoundDelayMs = $DelayMs; ConfirmationDelaySeconds = $ConfirmationDelaySeconds; TracerouteSkipped = $OmitTraceroute } }
         Environment = [pscustomobject][ordered]@{ ComputerName = $env:COMPUTERNAME; OSVersion = [Environment]::OSVersion.VersionString; PowerShellVersion = $PSVersionTable.PSVersion.ToString(); PowerShellEdition = $(if ($PSVersionTable.ContainsKey('PSEdition')) { $PSVersionTable.PSEdition } else { 'Desktop' }) }
+        Catalog = [pscustomobject][ordered]@{ Source = $script:CatalogSource; UpdatedAt = $script:CatalogUpdatedAt; RegionCount = $script:RegionOrder.Count }
+        Selection = $null; TargetDiscovery = $null; ProbePlan = [pscustomobject][ordered]@{ Strategy = 'RealIpValidation'; Icmp = $IcmpCount; Tcp = $TcpCount; ProbePort = $Port }
+        Screening = $null; FinalValidation = $null; Rankings = @(); Recommendation = $null
         Target = [pscustomobject][ordered]@{ Ip = $Address; Region = $detection.Region; ProbePort = $Port }
         RegionDetection = $detection; BaselineReference = $baseline; BaselineRefresh = $refresh
         RealMetrics = [pscustomobject][ordered]@{ Icmp = $initialRound.Icmp; Tcp = $initialRound.Tcp; Traceroute = $initialRound.Traceroute }
         Comparison = $comparison; InitialAssessment = $initialAssessment; Confirmation = $confirmation; Verdict = $verdict
+        RealValidation = [pscustomobject][ordered]@{ Target = [pscustomobject][ordered]@{ Ip = $Address; Region = $detection.Region; ProbePort = $Port }; RegionDetection = $detection; BaselineReference = $baseline; BaselineRefresh = $refresh; Comparison = $comparison; Verdict = $verdict }
         RawSamples = $initialRound.RawSamples
+        Warnings = @()
     }
     $historyInfo = [pscustomobject][ordered]@{ Path = $script:HistoryPath; Recovery = $historyRecovery; Write = $null }
     try { $store = Add-RealValidationHistory -Store $historyRead.Store -Report $report; $historyInfo.Write = Write-HistoryStore -Store $store } catch { $historyInfo.Write = [pscustomobject][ordered]@{ Error = $_.Exception.Message }; Write-Warning ("Validation completed but history could not be updated: {0}" -f $_.Exception.Message) }
@@ -1076,15 +1347,66 @@ function Invoke-RealIpValidation {
     return $report
 }
 
+function Read-InteractiveRequest {
+    param([scriptblock]$InputProvider)
+    while ($true) {
+        Write-Host ''
+        Write-Host 'AWS Region Select Tool'
+        Write-Host '[1] Global Lightsail Scan'
+        Write-Host '[2] Targeted Region Scan'
+        Write-Host '[3] Real IP Validation'
+        Write-Host '[Q] Quit'
+        $choice = ([string]$(if ($null -ne $InputProvider) { & $InputProvider 'Select' } else { Read-Host 'Select' })).Trim().ToLowerInvariant()
+        switch ($choice) {
+            '1' { return [pscustomobject][ordered]@{ Action = 'RegionProbe'; Target = 'global'; TargetIp = $null; Region = $null; ProbePort = 22 } }
+            '2' {
+                while ($true) {
+                    $selection = ([string]$(if ($null -ne $InputProvider) { & $InputProvider 'Region, group, custom comma list, or ?' } else { Read-Host 'Region, group, custom comma list, or ?' })).Trim()
+                    if ($selection -eq '?') { Show-TargetCatalog; continue }
+                    try { $null = Resolve-RegionSelection -Selection $selection; return [pscustomobject][ordered]@{ Action = 'RegionProbe'; Target = $selection; TargetIp = $null; Region = $null; ProbePort = 22 } }
+                    catch { Write-Warning $_.Exception.Message }
+                }
+            }
+            '3' {
+                $ip = ([string]$(if ($null -ne $InputProvider) { & $InputProvider 'Target IPv4' } else { Read-Host 'Target IPv4' })).Trim()
+                $override = ([string]$(if ($null -ne $InputProvider) { & $InputProvider 'Region override (optional)' } else { Read-Host 'Region override (optional)' })).Trim().ToLowerInvariant()
+                $portText = ([string]$(if ($null -ne $InputProvider) { & $InputProvider 'Probe port [22]' } else { Read-Host 'Probe port [22]' })).Trim()
+                $portValue = 22
+                if (-not [string]::IsNullOrWhiteSpace($portText) -and -not [int]::TryParse($portText,[ref]$portValue)) { Write-Warning 'Probe port must be an integer.'; continue }
+                return [pscustomobject][ordered]@{ Action = 'RealIpValidation'; Target = $null; TargetIp = $ip; Region = $override; ProbePort = $portValue }
+            }
+            'q' { return [pscustomobject][ordered]@{ Action = 'Quit'; Target = $null; TargetIp = $null; Region = $null; ProbePort = 22 } }
+            default { Write-Warning 'Choose 1, 2, 3, or Q.' }
+        }
+    }
+}
+
 function Invoke-EntryPoint {
     try {
+        if ($ListTargets) {
+            if (-not [string]::IsNullOrWhiteSpace($Target) -or -not [string]::IsNullOrWhiteSpace($TargetIp) -or -not [string]::IsNullOrWhiteSpace($Region)) { throw '-ListTargets cannot be combined with -Target, -TargetIp, or -Region.' }
+            Show-TargetCatalog
+            return 0
+        }
+        if (-not [string]::IsNullOrWhiteSpace($Target) -and -not [string]::IsNullOrWhiteSpace($TargetIp)) { throw '-Target and -TargetIp cannot be combined.' }
         if ([string]::IsNullOrWhiteSpace($TargetIp) -and -not [string]::IsNullOrWhiteSpace($Region)) { throw '-Region is valid only with -TargetIp.' }
+        if (-not [string]::IsNullOrWhiteSpace($Region)) {
+            $Region = $Region.Trim().ToLowerInvariant()
+            if ($Region -notin $script:RegionOrder) { throw "Unsupported Lightsail Region override '$Region'. Use -ListTargets." }
+        }
+        if ([string]::IsNullOrWhiteSpace($Target) -and [string]::IsNullOrWhiteSpace($TargetIp)) {
+            $request = Read-InteractiveRequest
+            if ($request.Action -eq 'Quit') { return 0 }
+            $Target = $request.Target; $TargetIp = $request.TargetIp; $Region = $request.Region; $ProbePort = $request.ProbePort
+        }
         if (-not [string]::IsNullOrWhiteSpace($TargetIp)) {
             $report = Invoke-RealIpValidation -Address $TargetIp -Port $ProbePort -RegionOverride $Region -SelectedMode $Mode -IcmpCount $IcmpSamplesPerRegion -TcpCount $TcpAttempts -IcmpTimeout $PingTimeoutMs -ConnectTimeout $ConnectionTimeoutMs -DelayMs $RoundDelayMs -TargetLimit $MaxTargetsPerRegion -JsonPath $OutputPath -WriteJson (-not $NoJson) -CachedTargetsOnly ([bool]$UseCachedTargets) -OmitTraceroute ([bool]$SkipTraceroute) -ConfirmationDelaySeconds $RetryDelaySeconds
             if (-not $report.Verdict.EvidenceComplete) { return 3 }
             return 0
         }
-        $report = Invoke-AwsRegionSelection -SelectedMode $Mode -IcmpCount $IcmpSamplesPerRegion -TcpCount $TcpAttempts -TlsCount $TlsAttempts -IcmpTimeout $PingTimeoutMs -ConnectTimeout $ConnectionTimeoutMs -DelayMs $RoundDelayMs -TargetLimit $MaxTargetsPerRegion -JsonPath $OutputPath -WriteJson (-not $NoJson) -CachedTargetsOnly ([bool]$UseCachedTargets) -OmitTraceroute ([bool]$SkipTraceroute) -SelectedRegions $script:RegionOrder -Scope 'AllRegions' -RecordHistory $true
+        $selection = Resolve-RegionSelection -Selection $Target
+        $scope = Get-SelectionScope -Selection $selection
+        $report = Invoke-AwsRegionSelection -SelectedMode $Mode -IcmpCount $IcmpSamplesPerRegion -TcpCount $TcpAttempts -TlsCount $TlsAttempts -IcmpTimeout $PingTimeoutMs -ConnectTimeout $ConnectionTimeoutMs -DelayMs $RoundDelayMs -TargetLimit $MaxTargetsPerRegion -JsonPath $OutputPath -WriteJson (-not $NoJson) -CachedTargetsOnly ([bool]$UseCachedTargets) -OmitTraceroute ([bool]$SkipTraceroute) -SelectedRegions $selection.Regions -Scope $scope -RecordHistory $true -Selection $selection.Normalized
         if ($null -eq $report.Recommendation.Region) { return 3 }
         return 0
     }
