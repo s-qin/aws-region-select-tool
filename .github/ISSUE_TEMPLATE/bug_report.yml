@@ -1,0 +1,81 @@
+name: Bug report
+description: Report reproducible incorrect behavior or a failed command.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Search existing issues first and remove credentials, private keys, personal paths, and other sensitive data from public logs or reports.
+  - type: input
+    id: tool_version
+    attributes:
+      label: Tool version
+      description: Release tag or commit SHA, for example v2.0.0.
+    validations:
+      required: true
+  - type: input
+    id: powershell_version
+    attributes:
+      label: PowerShell version
+      description: Output of $PSVersionTable.PSVersion.
+    validations:
+      required: true
+  - type: input
+    id: windows_version
+    attributes:
+      label: Windows version
+      description: For example Windows 11 24H2 or Windows Server 2025.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: Exact command used. Redact sensitive values.
+      render: powershell
+    validations:
+      required: true
+  - type: input
+    id: target
+    attributes:
+      label: Target or Region
+      description: Target group, Region, or real-IP mode target. Shorten the IP if disclosure is unnecessary.
+    validations:
+      required: true
+  - type: input
+    id: exit_code
+    attributes:
+      label: Exit code
+      description: Process exit code (normally 0, 2, or 3).
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened?
+      description: Include expected behavior and minimal reproduction steps.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Relevant console output or JSON report excerpt
+      description: Paste only the smallest useful, sanitized excerpt. Attach a sanitized report if needed.
+      render: text
+  - type: dropdown
+    id: network_layer
+    attributes:
+      label: Proxy, VPN, or TUN
+      options:
+        - Not active
+        - Active
+        - Unknown
+    validations:
+      required: true
+  - type: textarea
+    id: network_details
+    attributes:
+      label: Network details
+      description: If relevant, describe proxy, VPN, TUN, firewall, TLS inspection, or ICMP filtering without sharing secrets.

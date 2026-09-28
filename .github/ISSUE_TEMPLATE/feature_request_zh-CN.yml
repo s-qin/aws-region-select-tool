@@ -1,0 +1,42 @@
+name: 中文功能建议
+description: 提议对工具或文档进行范围聚焦的改进。
+title: "[功能]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        建议应尽量符合项目的有界网络探测、PowerShell 5.1/7.x 兼容和零第三方运行时依赖目标。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题或使用场景
+      description: 当前有什么困难，解决后谁会受益？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议改动
+      description: 请描述最小且有价值的行为或文档改动。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 替代方案与取舍
+      description: 可选填写替代方案、兼容性考虑或示例。
+  - type: dropdown
+    id: area
+    attributes:
+      label: 涉及范围
+      options:
+        - Region selection
+        - Real IP validation
+        - Reports 或 History
+        - CLI 或兼容性
+        - 文档
+        - 测试或维护
+    validations:
+      required: true

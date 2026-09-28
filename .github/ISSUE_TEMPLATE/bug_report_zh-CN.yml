@@ -1,0 +1,81 @@
+name: 中文错误报告
+description: 报告可复现的错误行为或命令失败。
+title: "[错误]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你报告问题。请先搜索现有 Issue，并从公开日志或报告中移除凭据、私钥、个人路径及其他敏感信息。
+  - type: input
+    id: tool_version
+    attributes:
+      label: 工具版本
+      description: Release tag 或 commit SHA，例如 v2.0.0。
+    validations:
+      required: true
+  - type: input
+    id: powershell_version
+    attributes:
+      label: PowerShell 版本
+      description: $PSVersionTable.PSVersion 的输出。
+    validations:
+      required: true
+  - type: input
+    id: windows_version
+    attributes:
+      label: Windows 版本
+      description: 例如 Windows 11 24H2 或 Windows Server 2025。
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: 执行命令
+      description: 实际执行的完整命令，请脱敏敏感值。
+      render: powershell
+    validations:
+      required: true
+  - type: input
+    id: target
+    attributes:
+      label: Target 或 Region
+      description: Target Group、Region 或真实 IP 模式目标；无需公开完整 IP 时请缩短。
+    validations:
+      required: true
+  - type: input
+    id: exit_code
+    attributes:
+      label: 退出码
+      description: 进程退出码（通常为 0、2 或 3）。
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: 发生了什么？
+      description: 请包含预期行为和最小复现步骤。
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 相关控制台输出或 JSON 报告片段
+      description: 仅粘贴最少且有用的脱敏片段；必要时可附加已脱敏报告。
+      render: text
+  - type: dropdown
+    id: network_layer
+    attributes:
+      label: Proxy、VPN 或 TUN
+      options:
+        - 未启用
+        - 已启用
+        - 不确定
+    validations:
+      required: true
+  - type: textarea
+    id: network_details
+    attributes:
+      label: 网络环境说明
+      description: 如相关，请说明 Proxy、VPN、TUN、防火墙、TLS inspection 或 ICMP filtering，勿提供秘密信息。

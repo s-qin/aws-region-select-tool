@@ -1,0 +1,42 @@
+name: Feature request
+description: Suggest a focused improvement to the tool or its documentation.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please keep proposals compatible with the project's bounded network probing, PowerShell 5.1/7.x support, and zero third-party runtime dependency goals.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What is difficult today, and who benefits from solving it?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the smallest useful behavior or documentation change.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and trade-offs
+      description: Optional alternatives, compatibility concerns, or examples.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Region selection
+        - Real IP validation
+        - Reports or history
+        - CLI or compatibility
+        - Documentation
+        - Testing or maintenance
+    validations:
+      required: true
