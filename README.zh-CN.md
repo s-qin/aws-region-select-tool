@@ -2,9 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-[![CI](https://github.com/s-qin/aws-region-select-tool/actions/workflows/test.yml/badge.svg)](https://github.com/s-qin/aws-region-select-tool/actions/workflows/test.yml)
-[![Release](https://img.shields.io/github/v/release/s-qin/aws-region-select-tool)](https://github.com/s-qin/aws-region-select-tool/releases/latest)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/s-qin/aws-region-select-tool/test.yml?branch=main&style=flat&label=CI)](https://github.com/s-qin/aws-region-select-tool/actions/workflows/test.yml) [![Release](https://img.shields.io/github/v/release/s-qin/aws-region-select-tool)](https://github.com/s-qin/aws-region-select-tool/releases/latest) [![Windows](https://img.shields.io/badge/Windows-10_%7C_11-0078D4?style=flat&logo=windows11&logoColor=white)](https://www.microsoft.com/windows) [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B_%7C_7.x-5391FE?style=flat&logo=powershell&logoColor=white)](https://learn.microsoft.com/powershell/) [![AWS Lightsail](https://img.shields.io/badge/AWS-Lightsail-FF9900?style=flat&logo=amazonwebservices&logoColor=white)](https://aws.amazon.com/lightsail/) [![License](https://img.shields.io/github/license/s-qin/aws-region-select-tool?style=flat&logo=opensourceinitiative&logoColor=white)](LICENSE)
 
 一个零第三方运行时依赖的 PowerShell 工具：从当前电脑和网络出口对可部署的 Amazon Lightsail Region 排序，并在部署后验证真实 AWS/Lightsail 实例 IPv4。
 
