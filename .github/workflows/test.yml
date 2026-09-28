@@ -1,0 +1,25 @@
+name: Windows PowerShell compatibility
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-tests:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Windows PowerShell 5.1
+        shell: powershell
+        run: .\tests\run-tests.ps1
+
+      - name: PowerShell 7.x
+        shell: pwsh
+        run: .\tests\run-tests.ps1

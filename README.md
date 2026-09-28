@@ -1,249 +1,287 @@
 # AWS Region Select Tool
 
-[简体中文](README.zh-CN.md)
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-[![Windows](https://img.shields.io/badge/Windows-10_%7C_11-0078D4?style=flat&logo=windows11&logoColor=white)](https://www.microsoft.com/windows) [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B_%7C_7.x-5391FE?style=flat&logo=powershell&logoColor=white)](https://learn.microsoft.com/powershell/) [![AWS Lightsail](https://img.shields.io/badge/AWS-Lightsail-FF9900?style=flat&logo=amazonwebservices&logoColor=white)](https://aws.amazon.com/lightsail/) [![License](https://img.shields.io/github/license/s-qin/aws-region-select-tool?style=flat&logo=opensourceinitiative&logoColor=white)](LICENSE)
+[![CI](https://github.com/s-qin/aws-region-select-tool/actions/workflows/test.yml/badge.svg)](https://github.com/s-qin/aws-region-select-tool/actions/workflows/test.yml)
+[![Release](https://img.shields.io/github/v/release/s-qin/aws-region-select-tool)](https://github.com/s-qin/aws-region-select-tool/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A single-file PowerShell tool with two complementary workflows: **Region Baseline** ranks three AWS US Regions before deployment, and **Real IP Validation** checks a newly assigned AWS/Lightsail IPv4 address against recent local baseline evidence.
+A zero-dependency PowerShell tool for ranking deployable Amazon Lightsail Regions from your current network and validating a real AWS/Lightsail instance IPv4 after deployment.
 
-- `us-east-1` — US East (N. Virginia)
-- `us-east-2` — US East (Ohio)
-- `us-west-2` — US West (Oregon)
+Version 2.0.0 supports Windows PowerShell 5.1 and PowerShell 7.x. It does not require AWS CLI, an AWS account, credentials, or third-party modules, and it never creates or changes AWS resources.
 
-It creates no AWS resources, needs no AWS account or AWS CLI, and has no third-party runtime dependencies. It supports Windows PowerShell 5.1+ and PowerShell 7.x on Windows 10/11.
+## Why use it?
 
-## How it works
+- Choose a Lightsail Region before creating an instance, using evidence from the computer and network that will actually use it.
+- Compare one Region, a built-in geographic group, a custom set, or the complete controlled Lightsail catalog.
+- Validate a real instance IP after deployment without confusing API-endpoint TCP/443 with instance TCP/22.
+- Keep bounded aggregate baseline history while retaining full samples only in per-run JSON reports.
 
-The tool reads AWS's [EC2 Reachability Test](http://ec2-reachability.amazonaws.com/) data source and selects up to three targets per Region. If discovery fails, it uses targets cached inside the script and records the fallback reason and cache date.
+This is a point-in-time network diagnostic, not a benchmark of cost, throughput, capacity, availability zones, SLA, or application performance.
 
-ICMP probes are sequential and interleaved across Regions in a randomized round-robin order. This keeps samples in similar time windows and avoids sustained or concurrent traffic to AWS's shared public targets. The tool then tests Regional AWS HTTPS endpoints and captures one traceroute per Region.
+## V2.0.0 highlights
 
-Each successful Baseline stores only aggregate results in `.data/baseline-history.json`. `-TargetIp` resolves AWS ownership using the official [AWS IP ranges](https://ip-ranges.amazonaws.com/ip-ranges.json), selects the most-specific IPv4 prefix, finds the nearest earlier same-Region baseline, and tests the real IP with ICMP and repeated TCP connections. A manual `-Region` override supports BYOIP, unpublished ranges, or an unavailable range feed without guessing.
+- Controlled catalog of 19 Lightsail Regions, sourced from AWS documentation and updated 2026-09-27.
+- Interactive no-argument workflow plus stable automation-friendly CLI.
+- Target Selector for a single Region, five built-in groups, and custom comma-separated sets.
+- Adaptive `Auto` mode: Standard for 1–6 Regions; Quick screening plus Standard finalist validation for 7 or more.
+- Separate `ScreeningRank`, `FinalistRank`, and `RecommendationRank` semantics.
+- Per-Region Reachability discovery failure isolation; missing targets remain visible as `Unavailable`.
+- Real IP Validation compatibility from v1.1, History 2.0 migration, and report JSON Schema 2.0.
 
-Real TCP (TCP/22 by default) is instance reachability evidence. It is intentionally not compared with the Baseline's Regional API TCP/443 measurement.
+## Requirements and zero dependency
 
-## What is tested
+- Windows 10 or 11.
+- Windows PowerShell 5.1+ or PowerShell 7.x.
+- Outbound ICMP where allowed, TCP/443 for Region probes, and the chosen instance TCP port for Real IP Validation.
+- Internet access for online EC2 Reachability discovery and automatic AWS IP ownership detection.
 
-| Test | Recorded values | Role |
-|---|---|---|
-| ICMP | sent, received, loss, min, average, P50, P95, max, population standard deviation (jitter) | Core latency and stability evidence |
-| TCP 443 | success rate, P50/P95 connect time, timeout count | Real connection capability |
-| TLS | success rate, P50/P95 handshake time, protocol and cipher | Certificate-validated application-path check |
-| `tracert` | bounded raw route output to the primary Reachability target | Diagnostic context only; never scored |
+Only built-in PowerShell and .NET APIs are used. AWS CLI and credentials are not used.
 
-Real IP mode records ICMP P50/P95/loss/jitter, TCP success rate and P50 for `-ProbePort`, plus one traceroute. TLS is not required because a new Lightsail instance normally exposes SSH/22 before HTTPS is configured.
+## Install or download
 
-## Install / download
-
-Download the script, inspect it, and then run it. Avoid piping a remote script directly into `Invoke-Expression`.
+Download `aws-region-select-tool.ps1` from the latest GitHub Release and verify it against `SHA256SUMS.txt`, or clone the repository:
 
 ```powershell
-$url = 'https://raw.githubusercontent.com/s-qin/aws-region-select-tool/main/aws-region-select-tool.ps1'
-Invoke-WebRequest -Uri $url -OutFile .\aws-region-select-tool.ps1
-Get-FileHash .\aws-region-select-tool.ps1 -Algorithm SHA256
+git clone https://github.com/s-qin/aws-region-select-tool.git
+cd aws-region-select-tool
 ```
 
-If Windows marks the downloaded file as blocked:
+PowerShell may require a process-scoped execution policy adjustment:
 
 ```powershell
-Unblock-File .\aws-region-select-tool.ps1
+Set-ExecutionPolicy -Scope Process Bypass
 ```
 
-## Usage
-
-Run the Standard profile:
+## Quick Start
 
 ```powershell
+# Interactive menu
 .\aws-region-select-tool.ps1
-```
 
-Run a shorter validation, force bundled targets, and omit traceroute:
+# Global Lightsail scan
+.\aws-region-select-tool.ps1 -Target global
 
-```powershell
-.\aws-region-select-tool.ps1 -Mode Quick -UseCachedTargets -SkipTraceroute
-```
+# v1.x US three-Region replacement
+.\aws-region-select-tool.ps1 -Target us-all -Mode Standard
 
-Validate a real instance IP (AWS Region auto-detected):
+# One Region or a custom set
+.\aws-region-select-tool.ps1 -Target ap-southeast-1
+.\aws-region-select-tool.ps1 -Target "ap-east-1,ap-southeast-1,ap-northeast-1"
 
-```powershell
+# Validate a deployed instance with SSH as the stable probe
 .\aws-region-select-tool.ps1 -TargetIp 203.0.113.10 -ProbePort 22
 ```
 
-Validate an unknown/BYOIP address with an explicit supported Region, bypassing the range download:
+## Interactive workflow
+
+No arguments opens one screen:
+
+```text
+[1] Global Lightsail Scan
+[2] Targeted Region Scan
+[3] Real IP Validation
+[Q] Quit
+```
+
+Targeted Scan accepts `?` to show the catalog and groups. Invalid menu or target input can be retried; `Q` exits without network activity.
+
+## Global Lightsail Scan
+
+`-Target global -Mode Auto` uses two distinct evidence stages:
+
+1. Quick screening of every catalog Region: 9 ICMP, 3 TCP, 2 TLS, no traceroute per Region.
+2. Standard validation of at most five healthy/evidence-complete finalists: 36 ICMP, 8 TCP, 4 TLS, and one diagnostic traceroute per finalist.
+
+The console shows the final Top 3 first, finalist validation second, and complete screening evidence last. A Region whose Reachability target cannot be confirmed remains in screening with `ProbeStatus=Unavailable` and a reason. Quick scores are never presented as a precise 1–19 final ranking.
+
+## Targeted Scan, target grammar, and groups
+
+Inputs are trimmed and case-insensitive, normalized to lowercase, deduplicated while preserving first occurrence, and validated completely before network activity.
+
+| Target | Regions |
+|---|---|
+| `us-all` | `us-east-1`, `us-east-2`, `us-west-2` |
+| `americas-all` | US three, `ca-central-1`, `sa-east-1` |
+| `eu-all` | `eu-central-1`, `eu-north-1`, `eu-south-2`, `eu-west-1`, `eu-west-2`, `eu-west-3` |
+| `apac-all` | `ap-east-1`, `ap-northeast-1`, `ap-northeast-2`, `ap-south-1`, `ap-southeast-1`, `ap-southeast-2`, `ap-southeast-3`, `ap-southeast-5` |
+| `global` | All 19 Regions in the current controlled catalog |
+
+Use `-ListTargets` to view codes, locations, geography, opt-in metadata, and exact group expansion. A single Region reports evidence without inventing a relative cross-Region rank.
+
+## Real IP Validation
 
 ```powershell
+# Automatic Region detection through the official AWS IPv4 range feed
+.\aws-region-select-tool.ps1 -TargetIp 203.0.113.10 -ProbePort 22
+
+# Offline/BYOIP recovery: explicitly provide a supported Lightsail Region
 .\aws-region-select-tool.ps1 -TargetIp 203.0.113.10 -Region us-west-2 -ProbePort 22
 ```
 
-Write the report to a chosen location:
+The tool uses longest-prefix IPv4 CIDR matching against AWS `ip-ranges.json` and reports Region, network border group, service, prefix, and prefix length. It does not assume a `LIGHTSAIL` service value. Unknown, BYOIP, or unpublished addresses are never guessed.
 
-```powershell
-.\aws-region-select-tool.ps1 -OutputPath .\reports\office-network.json
+Real validation measures multiple ICMP samples, repeated TCP connections to `-ProbePort` (default 22), traceroute, P50/P95/loss/jitter, TCP success rate, and TCP P50. It compares only ICMP metrics with the same-Region baseline. Regional AWS API TCP/443 is never directly compared with instance TCP/22.
+
+If the instance blocks ICMP but TCP is healthy, the result is `RETEST / INCONCLUSIVE`, not Critical. Temporarily allow Ping (ICMP) in the Lightsail firewall when a complete RTT comparison is required.
+
+Verdicts use multiple signals:
+
+- `KEEP / GOOD`: healthy TCP plus complete, fresh comparison with conservative degradation.
+- `RETEST / BORDERLINE`: moderate or mixed degradation.
+- `RETEST / INCONCLUSIVE`: ICMP filtered, missing comparison, incomplete evidence, or conflicting rounds.
+- `RETRY / POOR`: only after an initial poor result and one delayed shortened confirmation are both clearly poor.
+
+## Auto, Quick, Standard, and Thorough
+
+| Mode | Region behavior | ICMP / TCP / TLS per Region | Traceroute |
+|---|---|---:|---|
+| `Auto` | 1–6 Standard; 7+ Quick then up to 5 Standard finalists | Adaptive | Final validation only |
+| `Quick` | Entire selected set | 9 / 3 / 2 | Unless skipped |
+| `Standard` | Entire selected set | 36 / 8 / 4 | Once per Region |
+| `Thorough` | Entire selected set | 45 / 10 / 5 | Once per Region |
+
+Advanced count parameters override profile counts. All probes are serial, bounded, and rate-limited by `-RoundDelayMs`.
+
+## Metrics, Region Score, Health, and Confidence
+
+P50 represents typical latency; P95 exposes tail latency; packet loss records failed ICMP probes; jitter is population standard deviation. TCP/TLS combine success rate and handshake latency.
+
+Region Score preserves the v1.1 weights:
+
+- P50 30%, P95 20%, packet loss 20%, jitter 10%, TCP 15%, TLS 5%.
+
+Absolute quality and relative quality within the same stage are blended. Health gates (`Good`, `Fair`, `Degraded`, `Critical`, `NoData`) take precedence over Score. Confidence considers evidence completeness, health, score margin, baseline quality, and—in Real mode—TCP/ICMP availability and baseline freshness.
+
+Traceroute is diagnostic only and never contributes to Score.
+
+## Reachability target discovery
+
+The Lightsail Region Catalog and AWS-maintained EC2 Reachability targets are separate facts. At runtime the tool reads the declared Reachability source, validates IPv4 targets by selected Region, and uses only a verified built-in cache where one exists. A target or Region failure does not abort other Regions. The tool never fabricates an IP to make the catalog appear complete.
+
+`-UseCachedTargets` is mainly a diagnostic/offline option. The bundled cache covers only targets previously verified by the project; other Regions can correctly appear unavailable.
+
+## Reports and History
+
+Unless `-NoJson` is supplied, every run writes a timestamped JSON report with `SchemaVersion: "2.0"`.
+
+Region Probe reports can express:
+
+- `Tool`, `Environment`, `Test`, `Catalog`, `Selection`, `TargetDiscovery`, and `ProbePlan`.
+- `Screening`, `FinalValidation`, distinct rank fields, and `Recommendation`.
+- `History`, complete per-run `RawSamples`, and `Warnings`.
+
+Real reports use `Operation: "RealIpValidation"` and include `RealValidation`, Region detection, baseline reference/refresh, comparable deltas, metrics, verdict, confirmation, raw samples, and history status. Nonexistent stages are `null`; they are not fabricated.
+
+Aggregate history is stored relative to the script at:
+
+```text
+$PSScriptRoot\.data\baseline-history.json
 ```
 
-Show complete built-in help:
+History Schema 2.0 stores timestamps, scope, selection, profile, stage, Region aggregates, health, Score, and bounded Real verdict aggregates—never complete raw samples. It keeps 30 days, at most 50 Baseline runs and 100 Real validations. History 1.0 is lazily normalized to 2.0. Writes use a validated same-directory temporary file and atomic replace/move; corrupt data is quarantined and rebuilt.
 
-```powershell
-Get-Help .\aws-region-select-tool.ps1 -Full
-```
+Real baseline status is Fresh (≤6h), Usable (>6h and ≤24h), Stale (>24h), or Missing. Stale, Missing, or Quick-only references trigger a bounded Standard refresh for only the target Region.
 
-If local execution policy blocks scripts, use a process-scoped invocation rather than changing the machine policy:
+## CLI reference
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\aws-region-select-tool.ps1
-```
+| Parameter | Purpose |
+|---|---|
+| `-Target <value>` | Region, group, or comma-separated custom set |
+| `-ListTargets` | List catalog and groups without probing |
+| `-TargetIp <IPv4>` | Select Real IP Validation mode |
+| `-ProbePort <1-65535>` | Real TCP port; default 22 |
+| `-Region <code>` | Real-mode manual Region override |
+| `-RetryDelaySeconds <1-60>` | Delay before the only RETRY confirmation; default 5 |
+| `-Mode Auto\|Quick\|Standard\|Thorough` | Probe strategy; default Auto |
+| `-IcmpSamplesPerRegion <0,3-60>` | Override ICMP count; 0 uses profile |
+| `-TcpAttempts <1-15>` | Override TCP attempts; omit to use profile |
+| `-TlsAttempts <1-8>` | Override TLS attempts; omit to use profile |
+| `-PingTimeoutMs <250-5000>` | ICMP timeout |
+| `-ConnectionTimeoutMs <500-10000>` | TCP/TLS timeout |
+| `-RoundDelayMs <100-5000>` | Delay between ICMP rounds |
+| `-MaxTargetsPerRegion <1-3>` | Per-Region target cap |
+| `-OutputPath <path>` | JSON output path |
+| `-NoJson` | Suppress JSON report |
+| `-UseCachedTargets` | Skip online Reachability discovery |
+| `-SkipTraceroute` | Skip diagnostic traceroute |
 
-## Parameters
+`-Target` and `-TargetIp` are mutually exclusive. `-Region` is valid only with `-TargetIp`. Usage conflicts are rejected before network operations.
 
-| Parameter | Default | Meaning |
-|---|---:|---|
-| `-TargetIp` | none | IPv4 literal; selects Real IP Validation mode |
-| `-ProbePort` | `22` | Real IP TCP port, 1–65535 |
-| `-Region` | auto | Manual `us-east-1`, `us-east-2`, or `us-west-2` override; valid only with `-TargetIp` |
-| `-RetryDelaySeconds` | `5` | Delay before the one shortened confirmation of a RETRY candidate, 1–60 seconds |
-| `-Mode` | `Standard` | `Quick` = 9/3/2, `Standard` = 36/8/4, `Thorough` = 45/10/5 ICMP/TCP/TLS attempts per Region |
-| `-IcmpSamplesPerRegion` | profile | Override with 3–60 samples |
-| `-TcpAttempts` | profile | Override with 1–15 attempts |
-| `-TlsAttempts` | profile | Override with 1–8 attempts |
-| `-PingTimeoutMs` | `1200` | Per-ICMP timeout, 250–5000 ms |
-| `-ConnectionTimeoutMs` | `3000` | TCP connect and TLS handshake timeout, 500–10000 ms |
-| `-RoundDelayMs` | `250` | Pause after each ICMP round, 100–5000 ms |
-| `-MaxTargetsPerRegion` | `3` | Reachability targets used per Region, 1–3 |
-| `-OutputPath` | timestamped file | JSON destination |
-| `-NoJson` | off | Suppress JSON output |
-| `-UseCachedTargets` | off | Skip online target discovery |
-| `-SkipTraceroute` | off | Skip diagnostic traceroutes |
+## Exit codes
 
-In Real mode, profile defaults are Quick 6/4, Standard 15/8, and Thorough 25/12 ICMP/TCP attempts. Explicit `-IcmpSamplesPerRegion` and `-TcpAttempts` still override them. `-TlsAttempts` is retained for Baseline compatibility and is unused for the real IP.
+- `0`: completed with an actionable Region recommendation or Real verdict; listing/quit also succeeds.
+- `2`: invalid parameters, routing conflict, detection failure, or runtime error.
+- `3`: insufficient evidence for a safe recommendation/verdict.
 
-## Reading the output
+## Public-target etiquette and safety
 
-The ranking table shows the primary metrics, health state, and composite score. A per-Region section then shows successful attempts and traceroute status. Target source is always displayed.
+- Probes are serial with hard count, timeout, target, finalist, and confirmation limits.
+- No throughput, flood, stress, port-range scanning, or infinite retries.
+- One Region failure is isolated from the rest.
+- Generated `.data`, reports, test outputs, and temporary files are ignored by Git.
+- Reports contain diagnostics and local environment metadata; review them before sharing.
+- No secrets, tokens, cookies, AWS credentials, or private keys are requested or stored.
 
-Health is evaluated before recommendation:
+## Troubleshooting
 
-- `Good`: no material fault was detected.
-- `Fair`: usable, with mild loss, tail-latency, or TCP concerns.
-- `Degraded`: substantial loss or reduced TCP/TLS success; score is capped at 55.
-- `Critical`: TCP is unavailable or severe combined failures exist; score is capped at 25.
-- `NoData`: all core probes failed; score is 0.
-
-The process exits with `0` when a safe recommendation is produced, `3` when evidence is insufficient, and `2` for an unexpected runtime/usage failure. A diagnostic JSON report is still attempted for insufficient-evidence runs.
-
-## Real IP comparison and Verdict
-
-Baseline freshness is `Fresh` at 6 hours or less, `Usable` after 6 through 24 hours, `Stale` after 24 hours, and `Missing` when absent. Fresh/Usable evidence is used directly. Stale/Missing automatically triggers a Quick Baseline for only the detected Region; it never needlessly probes all three Regions.
-
-The table compares ICMP P50, P95, packet loss, and jitter with absolute and percentage deltas. A zero baseline denominator reports no percentage. The decision combines all available latency, loss, jitter, TCP success, completeness, and freshness evidence:
-
-- `KEEP / GOOD`: TCP success is at least 90%, ICMP comparison is available, and degradation stays within conservative P50 20%, P95 25%, loss 2 percentage points, and jitter 50% or 5 ms limits.
-- `RETEST / BORDERLINE`: evidence is usable but moderately degraded or mixed.
-- `RETEST / INCONCLUSIVE`: comparison is unavailable, evidence conflicts, or ICMP is blocked while TCP remains reachable.
-- `RETRY / POOR`: TCP success below 50% or at least two severe ICMP regressions. A final RETRY is emitted only if one delayed shortened confirmation is also a RETRY candidate; conflicting rounds become RETEST/INCONCLUSIVE.
-
-If ICMP has 100% loss but TCP/22 works, the tool reports “ICMP unavailable / possibly firewall-filtered,” lowers confidence, and never invents RTT deltas or labels the network Critical. For a complete Baseline comparison, temporarily enable the Lightsail Ping (ICMP) firewall rule, run the validation, then remove the rule if it is not otherwise needed.
-
-## Region Score and Confidence
-
-The 0–100 Region Score is not a lowest-ping ranking. Its weights are:
-
-| Component | Weight |
-|---|---:|
-| ICMP P50 | 30% |
-| ICMP P95 | 20% |
-| Packet loss | 20% |
-| RTT jitter / standard deviation | 10% |
-| TCP 443 quality | 15% |
-| TLS quality | 5% |
-
-Each component blends 70% bounded absolute quality with 30% relative position among the three Regions. TCP and TLS quality each combine 70% success rate with 30% median latency quality. Health caps prevent a low average latency from hiding a broken path.
-
-Confidence also considers score margin, health, and successful-data completeness:
-
-- `High`: a Good winner leads by at least 12 points with at least 85% data completeness.
-- `Medium`: the lead is decisive (at least 5 points), the winner is Good/Fair, and completeness is at least 65%.
-- `Low`: the top two are close, evidence is incomplete, or health is degraded.
-
-A margin below 5 points is reported as **No decisive winner**. Rerun later instead of treating a tiny point-in-time difference as conclusive. Scores are comparable only within one run, not across different devices, networks, or dates.
-
-## JSON report
-
-Unless `-NoJson` is used, Baseline reports use `aws-us-region-test_yyyy-MM-dd_HHmmss.json`; Real reports use `aws-real-ip-validation_<ip>_yyyy-MM-dd_HHmmss.json`. `SchemaVersion` is `1.1`.
-
-Top-level content includes:
-
-- tool and run settings;
-- UTC timestamps and PowerShell/Windows environment;
-- target source, retrieval/cache metadata, fallback reason, and targets;
-- ranked Region summaries, health, score components, completeness, and traceroute;
-- recommendation, confidence, decisiveness, and score margin;
-- every raw ICMP, TCP 443, and TLS sample, including structured errors.
-
-Baseline keeps the v1 top-level fields and adds `Operation: RegionBaseline` and `History`. Real reports use `Operation: RealIpValidation` with `Target`, `RegionDetection`, `BaselineReference`, `BaselineRefresh`, `RealMetrics`, `Comparison`, `InitialAssessment`, optional `Confirmation`, `Verdict`, `RawSamples`, and `History`.
-
-Parse it with:
-
-```powershell
-$report = Get-Content .\aws-us-region-test_2026-09-13_092500.json -Raw | ConvertFrom-Json
-$report.Recommendation
-$report.Rankings | Select-Object Region, Score, Health
-```
-
-## Local history
-
-The store is always relative to the script: `$PSScriptRoot\.data\baseline-history.json`, independent of the installation drive. It retains 30 days, at most 50 Baseline runs and 100 Real validations. Baseline entries contain UTC timestamp, mode/scope, Region, P50/P95/loss/jitter, Health, and Score; Real entries contain target/port aggregates, baseline reference, and Verdict. Full raw samples exist only in report JSON.
-
-Writes use a validated same-directory temporary file and atomic replace/move. The previous file is retained as `.bak`. Invalid JSON is moved to `.corrupt-<UTC>.json` and a clean store is rebuilt, so damaged history cannot permanently disable the tool. Delete `.data` to reset history.
+- **Region is Unavailable:** online discovery found no valid Reachability target and no verified cache exists. Retry later; do not substitute an arbitrary AWS IP.
+- **All TLS attempts fail:** a proxy, TLS inspection, or local network policy may block Regional endpoints. Review TCP and error fields; the health gate prevents unsafe recommendations.
+- **ICMP is 100% loss for a real instance:** confirm TCP reachability and optionally allow Lightsail Ping temporarily.
+- **AWS IP cannot be recognized:** the address may be BYOIP or newer than the published feed; use a truthful `-Region` override only when known.
+- **History warning:** the corrupt file is preserved as `.corrupt-*.json`; a fresh store is created automatically.
 
 ## Example output
 
-This shortened example matches the current CLI layout; values vary by network and time:
-
 ```text
-AWS US Region Network Test
-Source: Current PC / Current Network Exit
-Target Source: AWSReachabilityPage
+AWS Lightsail Region Selection
+Selection: global (19 Regions)
+Plan: TwoStage
 
-Rank Region    P50   P95     Loss Jitter TCP  Health Score
-1    us-west-2 185ms 191ms   0%   4.91ms 100% Good   68.5
-2    us-east-1 239ms 241ms   0%   4.02ms 100% Good   56.3
-3    us-east-2 251ms 252.6ms 0%   1.4ms  100% Good   53.5
+Final Recommendation
+RecommendationRank  Region          Score  Health
+1                   ap-southeast-1  91.4   Good
+2                   ap-east-1       87.2   Good
+3                   ap-northeast-1  82.6   Good
 
-Recommended Region: us-west-2 (US West (Oregon))
-Confidence: High
-Recommended from this run and network exit.
+Global Screening - All Selected Regions
+...all selected Regions, including explicit Unavailable rows...
 ```
 
-Real mode uses the heading `AWS Real IP Validation` and prints target, detected Region/source, probe port, baseline timestamp/age/status, the delta table, Instance Fit, Recommendation, Confidence, and reasons.
+Results are examples only; actual outcomes depend on the current computer, route, network exit, and time.
 
-## Limits and cautions
+## Development, tests, and CI
 
-- Results represent only the current PC, network exit, route, and test time. Run again at different times before a consequential deployment.
-- ICMP may be filtered or rate-limited. TCP/TLS corroborate it but do not measure application response time or throughput.
-- AWS range detection reflects the published feed. BYOIP/unpublished addresses require `-Region`; addresses outside the three supported Baseline Regions are rejected honestly.
-- A real instance port can be closed by its OS or Lightsail firewall. That is reachability evidence, not proof of poor geographic routing by itself.
-- A Regional AWS API endpoint can be reached through enterprise proxies or security products; interpret unusually low TCP times alongside TLS and ICMP.
-- `tracert` timeouts at intermediate hops are common and do not prove packet loss.
-- The tool does not evaluate service availability, cost, compliance, capacity, Availability Zones, data residency, or application architecture.
-- It is a pre-deployment signal, not continuous monitoring or a service-level guarantee.
-
-## Safety and privacy
-
-The script sends bounded, sequential probes and has no infinite retries or parallel fan-out. Even the Thorough profile is capped at 45 ICMP, 10 TCP, and 5 TLS attempts per Region, below the hard parameter maxima. Do not schedule it at high frequency against AWS's shared targets.
-
-No AWS credentials are requested or read. Reports/history can contain the local computer name, timestamps, target IPs, network errors, and traceroute paths; review them before sharing. Timestamped reports, `.data/`, `reports/`, `test-results/`, and temporary files are excluded from Git by default.
-
-## Development verification
-
-The repository includes a zero-dependency deterministic test runner:
+The deterministic suite performs no live public-target load and covers Catalog/groups/grammar, planner, per-Region failure isolation, rankings, JSON 2.0, History migration/retention/atomic recovery, CIDR detection, Real verdicts, confirmation, CLI conflicts, safety, docs, and license.
 
 ```powershell
 pwsh.exe -NoProfile -File .\tests\run-tests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\run-tests.ps1
 ```
 
-It covers the v1 regression plus IPv4/CIDR longest-prefix detection, unknown/override/fetch errors, history create/retention/atomic recovery, baseline age/selection, ICMP/TCP combinations, deltas, KEEP/RETEST/RETRY confirmation, insufficient evidence, JSON parsing, and rate-safety bounds. Live network results are intentionally not used as deterministic pass/fail fixtures.
+GitHub Actions runs the same suite on Windows PowerShell 5.1 and PowerShell 7.x. Live smoke tests are bounded and run manually because instantaneous public-network results are not deterministic fixtures.
+
+## v1.1 to v2.0 migration and breaking changes
+
+- No arguments now opens the interactive menu instead of immediately running the US three-Region baseline.
+- Use `.\aws-region-select-tool.ps1 -Target us-all -Mode Standard` for the v1.x baseline equivalent.
+- Region Probe default `-Mode` is now `Auto`; explicit `Quick`, `Standard`, and `Thorough` keep their profiles.
+- Report schema changes from 1.1 to 2.0. Consumers must route by `Operation` and read stage-specific fields.
+- History 1.0 is read and lazily normalized; deleting `.data` remains a safe way to reset local history.
+- Real IP parameters and core KEEP/RETEST/RETRY semantics remain compatible.
+
+## Known limitations
+
+- Catalog facts are controlled snapshots and require a project update when AWS changes Lightsail availability.
+- Reachability targets are dynamic and may be absent even for a supported Lightsail Region.
+- ICMP and traceroute can be filtered; TCP/TLS can be affected by proxies and endpoint policy.
+- Atomic writes prevent partial JSON, but simultaneous processes use last-completed-writer-wins rather than a cross-process lock.
+- Scores compare only candidates within the same probe stage; Quick and Standard evidence are deliberately not treated as equal precision.
+
+## Security
+
+Inspect downloaded scripts and verify release SHA-256 before execution. The tool performs only outbound diagnostics and local report/history writes. It does not call AWS management APIs or alter cloud resources.
 
 ## License
 
-[MIT](LICENSE) © 2026 sqin
+[MIT](LICENSE) — Copyright (c) 2026 sqin.
