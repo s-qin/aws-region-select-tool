@@ -145,7 +145,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-$script:ToolVersion = '2.0.0'
+$script:ToolVersion = '2.0.1'
 $script:ReachabilityUri = 'http://ec2-reachability.amazonaws.com/'
 $script:IpRangesUri = 'https://ip-ranges.amazonaws.com/ip-ranges.json'
 $script:HistoryPath = Join-Path $PSScriptRoot '.data\baseline-history.json'
@@ -1266,12 +1266,20 @@ function Invoke-RealIpValidation {
         [int]$IcmpCount, [int]$TcpCount, [int]$IcmpTimeout, [int]$ConnectTimeout,
         [int]$DelayMs, [int]$TargetLimit, [string]$JsonPath, [bool]$WriteJson,
         [bool]$CachedTargetsOnly, [bool]$OmitTraceroute, [int]$ConfirmationDelaySeconds,
-        [scriptblock]$IpRangesFetcher, [scriptblock]$BaselineRefresher, [scriptblock]$ProbeRunner
+        [scriptblock]$IpRangesFetcher, [scriptblock]$BaselineRefresher, [scriptblock]$ProbeRunner,
+        [object]$RegionResolution
     )
     $started = [datetime]::UtcNow
     if (-not (Test-IPv4Literal $Address)) { throw "TargetIp must be an IPv4 literal: $Address" }
     if ($IcmpCount -in @(1, 2)) { throw 'IcmpSamplesPerRegion must be 0 (preset) or between 3 and 60.' }
-    $detection = Resolve-AwsIpRegion -Address $Address -RegionOverride $RegionOverride -ContentFetcher $IpRangesFetcher
+    if ($null -ne $RegionResolution) {
+        if ($null -eq $RegionResolution.PSObject.Properties['Address'] -or $null -eq $RegionResolution.PSObject.Properties['Region']) { throw 'Interactive Region resolution is incomplete.' }
+        if ([string]$RegionResolution.Address -ne $Address) { throw 'Interactive Region resolution does not match TargetIp.' }
+        $detection = $RegionResolution
+    }
+    else {
+        $detection = Resolve-AwsIpRegion -Address $Address -RegionOverride $RegionOverride -ContentFetcher $IpRangesFetcher
+    }
     if ($detection.Region -notin $script:RegionOrder) { throw "UNSUPPORTED_REGION: detected Region '$($detection.Region)' is outside the supported baseline set: $($script:RegionOrder -join ', ')." }
 
     $realDefaults = switch ($SelectedMode) { 'Quick' { @{ Icmp = 6; Tcp = 4 } } 'Thorough' { @{ Icmp = 25; Tcp = 12 } } default { @{ Icmp = 15; Tcp = 8 } } }
@@ -1348,7 +1356,7 @@ function Invoke-RealIpValidation {
 }
 
 function Read-InteractiveRequest {
-    param([scriptblock]$InputProvider)
+    param([scriptblock]$InputProvider, [scriptblock]$RegionResolver)
     while ($true) {
         Write-Host ''
         Write-Host 'AWS Region Select Tool'
@@ -1358,24 +1366,37 @@ function Read-InteractiveRequest {
         Write-Host '[Q] Quit'
         $choice = ([string]$(if ($null -ne $InputProvider) { & $InputProvider 'Select' } else { Read-Host 'Select' })).Trim().ToLowerInvariant()
         switch ($choice) {
-            '1' { return [pscustomobject][ordered]@{ Action = 'RegionProbe'; Target = 'global'; TargetIp = $null; Region = $null; ProbePort = 22 } }
+            '1' { return [pscustomobject][ordered]@{ Action = 'RegionProbe'; Target = 'global'; TargetIp = $null; Region = $null; ProbePort = 22; RegionDetection = $null } }
             '2' {
                 while ($true) {
                     $selection = ([string]$(if ($null -ne $InputProvider) { & $InputProvider 'Region, group, custom comma list, or ?' } else { Read-Host 'Region, group, custom comma list, or ?' })).Trim()
                     if ($selection -eq '?') { Show-TargetCatalog; continue }
-                    try { $null = Resolve-RegionSelection -Selection $selection; return [pscustomobject][ordered]@{ Action = 'RegionProbe'; Target = $selection; TargetIp = $null; Region = $null; ProbePort = 22 } }
+                    try { $null = Resolve-RegionSelection -Selection $selection; return [pscustomobject][ordered]@{ Action = 'RegionProbe'; Target = $selection; TargetIp = $null; Region = $null; ProbePort = 22; RegionDetection = $null } }
                     catch { Write-Warning $_.Exception.Message }
                 }
             }
             '3' {
                 $ip = ([string]$(if ($null -ne $InputProvider) { & $InputProvider 'Target IPv4' } else { Read-Host 'Target IPv4' })).Trim()
-                $override = ([string]$(if ($null -ne $InputProvider) { & $InputProvider 'Region override (optional)' } else { Read-Host 'Region override (optional)' })).Trim().ToLowerInvariant()
-                $portText = ([string]$(if ($null -ne $InputProvider) { & $InputProvider 'Probe port [22]' } else { Read-Host 'Probe port [22]' })).Trim()
-                $portValue = 22
-                if (-not [string]::IsNullOrWhiteSpace($portText) -and -not [int]::TryParse($portText,[ref]$portValue)) { Write-Warning 'Probe port must be an integer.'; continue }
-                return [pscustomobject][ordered]@{ Action = 'RealIpValidation'; Target = $null; TargetIp = $ip; Region = $override; ProbePort = $portValue }
+                if (-not (Test-IPv4Literal $ip)) { throw "TargetIp must be an IPv4 literal: $ip" }
+                try {
+                    $detection = if ($null -ne $RegionResolver) { & $RegionResolver $ip } else { Resolve-AwsIpRegion -Address $ip }
+                    if ($null -eq $detection -or $null -eq $detection.PSObject.Properties['Region'] -or [string]::IsNullOrWhiteSpace([string]$detection.Region)) { throw "AWS_IP_NOT_RECOGNIZED: $ip did not resolve to an AWS Region." }
+                    if ($detection.Region -notin $script:RegionOrder) { throw "UNSUPPORTED_REGION: detected Region '$($detection.Region)' is outside the supported Lightsail Region catalog." }
+                    Write-Host ("Detected Region: {0} ({1})" -f $detection.Region,$script:RegionMetadata[$detection.Region].Name)
+                    return [pscustomobject][ordered]@{ Action = 'RealIpValidation'; Target = $null; TargetIp = $ip; Region = $null; ProbePort = 22; RegionDetection = $detection }
+                }
+                catch {
+                    $detectionError = $_.Exception.Message
+                    if ($detectionError -notlike 'AWS_IP_NOT_RECOGNIZED:*' -and $detectionError -notlike 'AWS_IP_RANGES_FETCH_FAILED:*' -and $detectionError -notlike 'UNSUPPORTED_REGION:*') { throw }
+                    Write-Warning ("AWS Region could not be detected automatically: {0}" -f $detectionError)
+                    $override = ([string]$(if ($null -ne $InputProvider) { & $InputProvider 'Region override' } else { Read-Host 'Region override' })).Trim().ToLowerInvariant()
+                    if ([string]::IsNullOrWhiteSpace($override)) { throw 'REGION_OVERRIDE_REQUIRED: automatic Region detection failed and Region override was empty.' }
+                    if ($override -notin $script:RegionOrder) { throw "Unsupported Lightsail Region override '$override'. Use -ListTargets." }
+                    $detection = Resolve-AwsIpRegion -Address $ip -RegionOverride $override
+                    return [pscustomobject][ordered]@{ Action = 'RealIpValidation'; Target = $null; TargetIp = $ip; Region = $override; ProbePort = 22; RegionDetection = $detection }
+                }
             }
-            'q' { return [pscustomobject][ordered]@{ Action = 'Quit'; Target = $null; TargetIp = $null; Region = $null; ProbePort = 22 } }
+            'q' { return [pscustomobject][ordered]@{ Action = 'Quit'; Target = $null; TargetIp = $null; Region = $null; ProbePort = 22; RegionDetection = $null } }
             default { Write-Warning 'Choose 1, 2, 3, or Q.' }
         }
     }
@@ -1383,6 +1404,7 @@ function Read-InteractiveRequest {
 
 function Invoke-EntryPoint {
     try {
+        $interactiveRegionResolution = $null
         if ($ListTargets) {
             if (-not [string]::IsNullOrWhiteSpace($Target) -or -not [string]::IsNullOrWhiteSpace($TargetIp) -or -not [string]::IsNullOrWhiteSpace($Region)) { throw '-ListTargets cannot be combined with -Target, -TargetIp, or -Region.' }
             Show-TargetCatalog
@@ -1397,10 +1419,10 @@ function Invoke-EntryPoint {
         if ([string]::IsNullOrWhiteSpace($Target) -and [string]::IsNullOrWhiteSpace($TargetIp)) {
             $request = Read-InteractiveRequest
             if ($request.Action -eq 'Quit') { return 0 }
-            $Target = $request.Target; $TargetIp = $request.TargetIp; $Region = $request.Region; $ProbePort = $request.ProbePort
+            $Target = $request.Target; $TargetIp = $request.TargetIp; $Region = $request.Region; $ProbePort = $request.ProbePort; $interactiveRegionResolution = $request.RegionDetection
         }
         if (-not [string]::IsNullOrWhiteSpace($TargetIp)) {
-            $report = Invoke-RealIpValidation -Address $TargetIp -Port $ProbePort -RegionOverride $Region -SelectedMode $Mode -IcmpCount $IcmpSamplesPerRegion -TcpCount $TcpAttempts -IcmpTimeout $PingTimeoutMs -ConnectTimeout $ConnectionTimeoutMs -DelayMs $RoundDelayMs -TargetLimit $MaxTargetsPerRegion -JsonPath $OutputPath -WriteJson (-not $NoJson) -CachedTargetsOnly ([bool]$UseCachedTargets) -OmitTraceroute ([bool]$SkipTraceroute) -ConfirmationDelaySeconds $RetryDelaySeconds
+            $report = Invoke-RealIpValidation -Address $TargetIp -Port $ProbePort -RegionOverride $Region -SelectedMode $Mode -IcmpCount $IcmpSamplesPerRegion -TcpCount $TcpAttempts -IcmpTimeout $PingTimeoutMs -ConnectTimeout $ConnectionTimeoutMs -DelayMs $RoundDelayMs -TargetLimit $MaxTargetsPerRegion -JsonPath $OutputPath -WriteJson (-not $NoJson) -CachedTargetsOnly ([bool]$UseCachedTargets) -OmitTraceroute ([bool]$SkipTraceroute) -ConfirmationDelaySeconds $RetryDelaySeconds -RegionResolution $interactiveRegionResolution
             if (-not $report.Verdict.EvidenceComplete) { return 3 }
             return 0
         }

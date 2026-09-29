@@ -113,6 +113,43 @@ Assert-True ($menuRequest.Action -eq 'RegionProbe' -and $menuRequest.Target -eq 
 $quitInputs = New-Object 'System.Collections.Generic.Queue[string]'; $quitInputs.Enqueue('q')
 Assert-Equal (Read-InteractiveRequest -InputProvider { param($prompt) $quitInputs.Dequeue() }).Action 'Quit' 'Interactive Q safely exits'
 
+$knownInputs = New-Object 'System.Collections.Generic.Queue[string]'
+@('3','10.1.2.3') | ForEach-Object { $knownInputs.Enqueue($_) }
+$knownPrompts = New-Object 'System.Collections.Generic.List[string]'
+$knownInteractive = Read-InteractiveRequest -InputProvider { param($prompt) $knownPrompts.Add($prompt); $knownInputs.Dequeue() } -RegionResolver {
+    param($address)
+    [pscustomobject][ordered]@{ Source='AWS ip-ranges.json';SourceUri='fixture://ip-ranges';RetrievedAtUtc=[datetime]::UtcNow.ToString('o');Address=$address;Region='us-west-2';NetworkBorderGroup='us-west-2';Service='EC2';Prefix='10.1.0.0/16';PrefixLength=16 }
+}
+Assert-True (($knownPrompts -join ',') -eq 'Select,Target IPv4') 'Known interactive Real path prompts only for Target IPv4'
+Assert-True ($knownInteractive.RegionDetection.Region -eq 'us-west-2' -and $knownInteractive.RegionDetection.Source -eq 'AWS ip-ranges.json') 'Known interactive Real path preserves automatic Region detection'
+Assert-Equal $knownInteractive.ProbePort 22 'Known interactive Real path silently defaults to TCP/22'
+
+$fallbackInputs = New-Object 'System.Collections.Generic.Queue[string]'
+@('3','192.0.2.20','us-west-2') | ForEach-Object { $fallbackInputs.Enqueue($_) }
+$fallbackPrompts = New-Object 'System.Collections.Generic.List[string]'
+$fallbackInteractive = Read-InteractiveRequest -InputProvider { param($prompt) $fallbackPrompts.Add($prompt); $fallbackInputs.Dequeue() } -RegionResolver { throw 'AWS_IP_NOT_RECOGNIZED: fixture unknown address.' }
+Assert-True (($fallbackPrompts -join ',') -eq 'Select,Target IPv4,Region override') 'Unknown interactive Real path prompts once for Region override only after detection failure'
+Assert-True ($fallbackInteractive.Region -eq 'us-west-2' -and $fallbackInteractive.RegionDetection.Source -eq 'ManualOverride') 'Interactive fallback preserves explicit Region override semantics'
+Assert-Equal $fallbackInteractive.ProbePort 22 'Interactive fallback silently defaults to TCP/22'
+
+$fetchFailureInputs = New-Object 'System.Collections.Generic.Queue[string]'
+@('3','192.0.2.23','eu-west-1') | ForEach-Object { $fetchFailureInputs.Enqueue($_) }
+$fetchFailurePrompts = New-Object 'System.Collections.Generic.List[string]'
+$fetchFailureInteractive = Read-InteractiveRequest -InputProvider { param($prompt) $fetchFailurePrompts.Add($prompt); $fetchFailureInputs.Dequeue() } -RegionResolver { throw 'AWS_IP_RANGES_FETCH_FAILED: fixture feed outage.' }
+Assert-True (($fetchFailurePrompts -join ',') -eq 'Select,Target IPv4,Region override' -and $fetchFailureInteractive.Region -eq 'eu-west-1') 'Interactive fetch failure requests one Region override and continues safely'
+
+$emptyOverrideInputs = New-Object 'System.Collections.Generic.Queue[string]'
+@('3','192.0.2.21','') | ForEach-Object { $emptyOverrideInputs.Enqueue($_) }
+$emptyOverrideRejected = $false
+try { $null = Read-InteractiveRequest -InputProvider { param($prompt) $emptyOverrideInputs.Dequeue() } -RegionResolver { throw 'AWS_IP_NOT_RECOGNIZED: fixture unknown address.' } } catch { $emptyOverrideRejected = $_.Exception.Message -match 'REGION_OVERRIDE_REQUIRED' }
+Assert-True $emptyOverrideRejected 'Interactive fallback rejects an empty Region override without guessing'
+
+$invalidOverrideInputs = New-Object 'System.Collections.Generic.Queue[string]'
+@('3','192.0.2.22','us-west-1') | ForEach-Object { $invalidOverrideInputs.Enqueue($_) }
+$invalidOverrideRejected = $false
+try { $null = Read-InteractiveRequest -InputProvider { param($prompt) $invalidOverrideInputs.Dequeue() } -RegionResolver { throw 'AWS_IP_NOT_RECOGNIZED: fixture unknown address.' } } catch { $invalidOverrideRejected = $_.Exception.Message -match 'Unsupported Lightsail Region override' }
+Assert-True $invalidOverrideRejected 'Interactive fallback rejects an unsupported Region override'
+
 $fixtureHtml = @'
 <table>
 <tr><td>us-east-1</td><td>10.0.0.0/8</td><td>1.1.1.1</td><td>1.1.1.2</td></tr>
@@ -316,6 +353,24 @@ $historyAfterReal = (Read-HistoryStore -Path $script:HistoryPath).Store
 Assert-True ($historyAfterReal.BaselineRuns.Count -eq 1 -and $historyAfterReal.RealValidations.Count -eq 1) 'Real workflow persists bounded aggregate history'
 Assert-True ($historyAfterReal.RealValidations[0].PSObject.Properties.Name -notcontains 'RawSamples') 'History omits full raw samples'
 
+$autoInteractiveIntegrated = Invoke-RealIpValidation -Address '10.1.2.3' -Port $knownInteractive.ProbePort -RegionOverride $null -RegionResolution $knownInteractive.RegionDetection -SelectedMode 'Quick' -IcmpCount 3 -TcpCount 2 -IcmpTimeout 250 -ConnectTimeout 500 -DelayMs 100 -TargetLimit 1 -JsonPath $null -WriteJson $false -CachedTargetsOnly $true -OmitTraceroute $true -ConfirmationDelaySeconds 1 -IpRangesFetcher { throw 'Automatic interactive Region must not be fetched twice.' } -BaselineRefresher $baselineRefresher -ProbeRunner $probeRunner
+Assert-True ($autoInteractiveIntegrated.RegionDetection.Source -eq 'AWS ip-ranges.json' -and $autoInteractiveIntegrated.Target.Region -eq 'us-west-2') 'Interactive automatic Region resolution is reused without provenance loss'
+Assert-Equal $autoInteractiveIntegrated.Target.ProbePort 22 'Integrated interactive Real workflow uses silent default TCP/22'
+
+$script:CapturedProbePort = $null
+$portProbeRunner = {
+    param($ip,$resolvedRegion,$probePort,$icmpN,$tcpN,$pingMs,$connectMs,$roundMs,$skipTrace)
+    $script:CapturedProbePort = $probePort
+    [pscustomobject][ordered]@{
+        Icmp=Get-SampleStatistics (New-Samples @(105,107,109) 0)
+        Tcp=Get-SampleStatistics (New-Samples @(90,92) 0)
+        Traceroute=[pscustomobject]@{Region=$resolvedRegion;Target=$ip;Skipped=$true;Success=$false;Output=@();Error=$null}
+        RawSamples=[pscustomobject]@{Icmp=@();Tcp=@()}
+    }
+}
+$explicitPortIntegrated = Invoke-RealIpValidation -Address '192.0.2.13' -Port 443 -RegionOverride 'us-west-2' -SelectedMode 'Quick' -IcmpCount 3 -TcpCount 2 -IcmpTimeout 250 -ConnectTimeout 500 -DelayMs 100 -TargetLimit 1 -JsonPath $null -WriteJson $false -CachedTargetsOnly $true -OmitTraceroute $true -ConfirmationDelaySeconds 1 -BaselineRefresher $baselineRefresher -ProbeRunner $portProbeRunner
+Assert-True ($script:CapturedProbePort -eq 443 -and $explicitPortIntegrated.Target.ProbePort -eq 443) 'Explicit Real ProbePort remains effective'
+
 $staleStore = New-HistoryStore
 $staleStore.BaselineRuns = @([pscustomobject]@{TimestampUtc=[datetime]::UtcNow.AddHours(-25).ToString('o');Mode='Standard';Scope='AllRegions';Regions=@([pscustomobject]@{Region='us-west-2';P50Ms=150;P95Ms=170;LossPct=1;JitterMs=8;Health='Fair';Score=65})})
 $null = Write-HistoryStore -Store $staleStore -Path $script:HistoryPath
@@ -367,18 +422,28 @@ Assert-True (@($autoReport.FinalValidation.Rankings).Count -eq 5 -and @($autoRep
 Assert-True ($null -ne $autoReport.Screening.Rankings[0].PSObject.Properties['ScreeningRank'] -and $null -ne $autoReport.FinalValidation.Rankings[0].PSObject.Properties['FinalistRank']) 'Screening and finalist rank semantics remain separate'
 Assert-True ($null -ne $autoReport.RawSamples.Screening -and $null -ne $autoReport.RawSamples.FinalValidation -and $autoReport.Warnings.Count -eq 1) 'Schema 2.0 retains stage raw samples and explicit warnings'
 
+$targetedRegions = @($script:RegionOrder | Select-Object -First 3)
+$targetedReport = Invoke-AwsRegionSelection -SelectedMode 'Standard' -IcmpCount 3 -TcpCount 1 -TlsCount 1 -IcmpTimeout 250 -ConnectTimeout 500 -DelayMs 100 -TargetLimit 1 -JsonPath $null -WriteJson $false -CachedTargetsOnly $false -OmitTraceroute $true -SelectedRegions $targetedRegions -Scope 'Group:us-all' -RecordHistory $false -Selection 'us-all' -TargetDiscoveryProvider $mockTargets -ProbeProvider $mockProbe
+Assert-True ($targetedReport.Operation -eq 'RegionProbe' -and $targetedReport.ProbePlan.Strategy -eq 'SingleStage' -and @($targetedReport.FinalValidation.Rankings).Count -eq 3) 'Integrated Targeted Standard workflow remains unchanged'
+
 $cliInvalid = Invoke-CliProcess '-Target us-west-1 -NoJson'
 Assert-Equal $cliInvalid.ExitCode 2 'CLI rejects invalid Target before network operations'
 $cliConflict = Invoke-CliProcess '-Target us-all -TargetIp 192.0.2.1 -NoJson'
 Assert-Equal $cliConflict.ExitCode 2 'CLI rejects Target and TargetIp conflict before network operations'
 $cliRegion = Invoke-CliProcess '-Region us-west-2 -NoJson'
 Assert-Equal $cliRegion.ExitCode 2 'CLI rejects Region override outside Real mode'
+$cliTargetIpInvalid = Invoke-CliProcess '-TargetIp not-an-ip -NoJson'
+Assert-True ($cliTargetIpInvalid.ExitCode -eq 2 -and $cliTargetIpInvalid.Output -notmatch 'Region override|Probe port') 'Direct TargetIp CLI remains non-interactive'
 $cliList = Invoke-CliProcess '-ListTargets -NoJson'
 Assert-True ($cliList.ExitCode -eq 0 -and $cliList.Output -match 'ap-southeast-5' -and $cliList.Output -match 'global:') 'ListTargets is network-free and exposes full catalog/groups'
 
 Remove-Item -LiteralPath $testDataRoot -Recurse -Force
 
 $source = Get-Content -LiteralPath $scriptPath -Raw
+$oldPromptPattern = 'Region override ' + [char]40 + 'optional' + [char]41
+Assert-True ($source -notmatch [regex]::Escape($oldPromptPattern) -and $source -notmatch [regex]::Escape('Probe port [22]')) 'Obsolete interactive Region and Probe Port prompts are removed'
+Assert-Equal $script:ToolVersion '2.0.1' 'Tool version is v2.0.1'
+Assert-Equal $ProbePort 22 'Default CLI ProbePort remains TCP/22'
 Assert-True ($source -match "ValidateRange\(0, 60\)" -and $source -match "ValidateRange\(100, 5000\)") 'Probe count and delay have hard safety bounds'
 Assert-True ($source -notmatch 'ForEach-Object\s+-Parallel' -and $source -notmatch 'Start-ThreadJob|Start-Job') 'No parallel probe fan-out'
 
@@ -394,7 +459,7 @@ Assert-True ($readmeEn -match 'Region Score' -and $readmeEn -match 'Confidence' 
 Assert-True ($readmeEn -match 'Schema 2\.0' -and $readmeZh -match 'Schema 2\.0' -and $readmeEn -match 'us-all' -and $readmeZh -match 'us-all' -and $readmeEn -match 'Quick-only' -and $readmeZh -match 'Quick evidence') 'README V2 schema groups and baseline-quality parity'
 $changelog = Get-Content -LiteralPath (Join-Path $root 'CHANGELOG.md') -Raw -Encoding UTF8
 $workflow = Get-Content -LiteralPath (Join-Path $root '.github\workflows\test.yml') -Raw -Encoding UTF8
-Assert-True ($changelog -match '\[2\.0\.0\].*2026-09-28' -and $changelog -match 'Breaking' -and $changelog -match 'Schema 2\.0') 'CHANGELOG records V2 release and breaking schema'
+Assert-True ($changelog -match '\[2\.0\.1\].*2026-09-29' -and $changelog -match 'Interactive Real IP Validation' -and $changelog -match '\[2\.0\.0\].*2026-09-28' -and $changelog -match 'Schema 2\.0') 'CHANGELOG records v2.0.1 patch and v2.0 compatibility history'
 Assert-True ($workflow -match 'windows-latest' -and $workflow -match 'shell: powershell' -and $workflow -match 'shell: pwsh' -and $workflow -notmatch 'Target global|TargetIp') 'CI covers both runtimes without live probes'
 $license = Get-Content -LiteralPath (Join-Path $root 'LICENSE') -Raw
 Assert-True ($license -match 'MIT License' -and $license -match 'Copyright \(c\) 2026 sqin') 'MIT License identity'

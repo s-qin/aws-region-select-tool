@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## [2.0.1] - 2026-09-29
+
+### Changed
+
+- Interactive Real IP Validation now asks only for Target IPv4 when AWS Region detection succeeds.
+- Region override is requested only when automatic longest-prefix detection cannot provide a supported Lightsail Region.
+- Interactive validation silently uses TCP/22; advanced CLI callers can still use `-ProbePort` and `-Region`.
+
+### Compatibility
+
+- No scoring, probe-model, History, or JSON Schema changes.
+- Windows PowerShell 5.1, PowerShell 7.x, Global/Targeted scans, and non-interactive Real IP CLI behavior remain supported.
+
 ## [2.0.0] - 2026-09-28
 
 ### Added
@@ -43,6 +56,7 @@ All notable changes to this project are documented here.
 
 - Initial three-US-Region baseline selection with ICMP, TCP, TLS, traceroute, scoring, confidence, and JSON reporting.
 
+[2.0.1]: https://github.com/s-qin/aws-region-select-tool/releases/tag/v2.0.1
 [2.0.0]: https://github.com/s-qin/aws-region-select-tool/releases/tag/v2.0.0
 [1.1.0]: https://github.com/s-qin/aws-region-select-tool/commits/2a179946974e2dcb89a42dda7ba2864c3a38d89b
 [1.0.0]: https://github.com/s-qin/aws-region-select-tool/commits/b4a1b436c541150dc7f8ee2d73ebc3aa2b766ba4

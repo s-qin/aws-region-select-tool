@@ -1,5 +1,6 @@
 # Generated reports
 aws-us-region-test_*.json
+aws-region-probe_*.json
 aws-real-ip-validation_*.json
 reports/
 .data/
