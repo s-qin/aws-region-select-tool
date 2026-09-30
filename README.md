@@ -6,7 +6,7 @@
 
 A zero-dependency PowerShell tool for ranking deployable Amazon Lightsail Regions from your current network and validating a real AWS/Lightsail instance IPv4 after deployment.
 
-Version 2.0.0 supports Windows PowerShell 5.1 and PowerShell 7.x. It does not require AWS CLI, an AWS account, credentials, or third-party modules, and it never creates or changes AWS resources.
+Version 2.0.1 supports Windows PowerShell 5.1 and PowerShell 7.x. It does not require AWS CLI, an AWS account, credentials, or third-party modules, and it never creates or changes AWS resources.
 
 ## Why use it?
 

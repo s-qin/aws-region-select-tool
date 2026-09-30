@@ -6,7 +6,7 @@
 
 一个零第三方运行时依赖的 PowerShell 工具：从当前电脑和网络出口对可部署的 Amazon Lightsail Region 排序，并在部署后验证真实 AWS/Lightsail 实例 IPv4。
 
-版本 2.0.0 支持 Windows PowerShell 5.1 与 PowerShell 7.x；不要求 AWS CLI、AWS 账号、凭据或第三方模块，也绝不会创建或修改 AWS 资源。
+版本 2.0.1 支持 Windows PowerShell 5.1 与 PowerShell 7.x；不要求 AWS CLI、AWS 账号、凭据或第三方模块，也绝不会创建或修改 AWS 资源。
 
 ## 为什么使用它？
 
