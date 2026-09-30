@@ -12,7 +12,7 @@ body:
     id: tool_version
     attributes:
       label: 工具版本
-      description: Release tag 或 commit SHA，例如 v2.0.0。
+      description: Release tag 或 commit SHA，例如 v2.0.1。
     validations:
       required: true
   - type: input

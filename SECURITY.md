@@ -4,7 +4,7 @@
 
 ## Supported versions
 
-Security fixes are provided for the latest published GitHub Release. The current supported release is `v2.0.0`; older releases and unreleased commits are not supported.
+Security fixes are provided for the latest published GitHub Release. The current supported release is `v2.0.1`; older releases and unreleased commits are not supported.
 
 ## Report a vulnerability
 
